@@ -1,0 +1,39 @@
+# Local runs
+runs/
+*.png
+
+# Internal notes (not for public repo)
+validation/internal/
+
+# Build artifacts
+build/
+validation/build/
+validation/build-*/
+*.egg-info/
+dist/
+__pycache__/
+*.pyc
+*.so
+*.o
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal design / pre-publication drafts
+Research proposal/
+paper/
+
+# Stray CLI output
+predicted.csv
+
+# Empty placeholder
+tests/fixtures/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/

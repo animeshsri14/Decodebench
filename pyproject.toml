@@ -1,0 +1,28 @@
+[project]
+name = "decodebench"
+version = "0.1.0"
+description = "Quantify how much of your LLM decode-chain fusion gain comes from launch overhead vs. eliminated intermediate bytes."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+decodebench = "decodebench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: tests requiring CUDA GPU",
+]
+testpaths = ["tests"]
+pythonpath = ["."]
