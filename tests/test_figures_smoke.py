@@ -10,7 +10,7 @@ from decodebench.figures import (
 def test_plot_verdict_bar(tmp_path):
     # Create mock verdicts
     v1 = compute_verdict(t_stream=20.0, t_graph=16.0, total_bytes=33595392, eliminable_bytes=16384)
-    v2 = compute_verdict(t_stream=25.0, t_graph=18.0, total_bytes=180437504, eliminable_bytes=44032)
+    v2 = compute_verdict(t_stream=25.0, t_graph=18.0, total_bytes=180481536, eliminable_bytes=88064)
     v4 = compute_verdict(t_stream=30.0, t_graph=16.0, total_bytes=17317888, eliminable_bytes=524288)
     
     verdicts = {"f1": v1, "f2": v2, "f4": v4}

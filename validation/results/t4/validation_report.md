@@ -1,4 +1,9 @@
 # DecodeBench Validation Report
+
+> **RETRACTED VALIDATION STATUS:** This historical report was produced with
+> superseded one-sided/WARN-counts-as-PASS gates and variant-dependent cache
+> residency. Its raw measurements are retained, but its PASS summary is not
+> valid evidence under the current pipeline. A fresh hardware run is required.
 Generated: 2026-07-02T11:28:37.331378
 
 ## Check (G1): Numerical correctness (fused/unfused vs CPU reference)

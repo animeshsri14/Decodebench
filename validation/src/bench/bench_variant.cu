@@ -9,8 +9,15 @@
 //                 --seed 42 --csv <path> [--ncu-mode] [--skip-correctness]
 //
 // --dim semantics: F1/F2 hidden dimension d_in; F4 KV-cache length L
-// (H=32, D=128 fixed). --batch is a CSV label only (reserved; no kernel
-// is batched yet).
+// (H=32, D=128 fixed). --batch: only 1 is accepted. The kernels are
+// unbatched; the harness refuses to label unbatched runs with batch>1
+// (previously the value was a CSV label only, which allowed fictitious
+// batch sweeps).
+//
+// Cache-residency parity: every variant (unfused-stream, unfused-graph,
+// fused) uses the same round-robin weight/KV replica rotation, so L2
+// residency is equivalent across variants. unfused-graph captures one
+// graph per replica and rotates graph launches.
 
 #include <cstdio>
 #include <cstdlib>
@@ -59,7 +66,43 @@ using namespace decodebench_val;
   }                                                              \
 } while (0)
 
+// Check for launch-configuration errors immediately after kernel launches.
+#define CUDA_CHECK_LAUNCH() CUDA_CHECK(cudaGetLastError())
+
 static int div_up(int a, int b) { return (a + b - 1) / b; }
+
+static int adaptive_iters(float target_ms, float t_one_us) {
+  const double desired = ceil(static_cast<double>(target_ms) * 1000.0 /
+                              static_cast<double>(t_one_us));
+  if (desired >= 1000000.0) return 1000000;
+  return std::max(200, static_cast<int>(desired));
+}
+
+// Per-replica CUDA graph set: one instantiated graph per weight replica so
+// graph replay rotates residency exactly like the stream/fused paths.
+struct GraphSet {
+  std::vector<cudaGraphExec_t> execs;
+  cudaGraphExec_t get(int k) const { return execs[k % execs.size()]; }
+  bool empty() const { return execs.empty(); }
+  ~GraphSet() {
+    for (auto e : execs) if (e) cudaGraphExecDestroy(e);
+  }
+};
+
+template <typename LaunchFn>
+static void capture_graph_per_replica(cudaStream_t stream, int n_copies,
+                                      LaunchFn launch, GraphSet* out) {
+  for (int i = 0; i < n_copies; ++i) {
+    cudaGraph_t graph = nullptr;
+    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    launch(i);
+    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
+    cudaGraphExec_t exec = nullptr;
+    CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    CUDA_CHECK(cudaGraphDestroy(graph));
+    out->execs.push_back(exec);
+  }
+}
 
 // Get GPU name string (truncated to 63 chars, no spaces for CSV)
 static std::string gpu_name() {
@@ -135,6 +178,44 @@ static void cpu_f2(const std::vector<__half>& xh,
   cpu_swiglu(gv, uv, y, d_out);
 }
 
+static void cpu_f4(const std::vector<__half>& q,
+                   const std::vector<__half>& K,
+                   const std::vector<__half>& V,
+                   std::vector<__half>& out, int H, int L, int D) {
+  // Independent, straightforward scaled-dot-product attention reference.
+  // It deliberately shares no tiling, split-KV, or reduction code with any
+  // GPU implementation, so G1 can catch a bug common to the GPU witnesses.
+  std::vector<float> probs(L);
+  const float scale = 1.0f / sqrtf(static_cast<float>(D));
+  for (int h = 0; h < H; ++h) {
+    const size_t q_base = static_cast<size_t>(h) * D;
+    const size_t kv_base = static_cast<size_t>(h) * L * D;
+    float row_max = -INFINITY;
+    for (int l = 0; l < L; ++l) {
+      float dot = 0.0f;
+      const size_t row = kv_base + static_cast<size_t>(l) * D;
+      for (int d = 0; d < D; ++d)
+        dot += __half2float(q[q_base + d]) * __half2float(K[row + d]);
+      probs[l] = dot * scale;
+      row_max = fmaxf(row_max, probs[l]);
+    }
+    float row_sum = 0.0f;
+    for (int l = 0; l < L; ++l) {
+      probs[l] = expf(probs[l] - row_max);
+      row_sum += probs[l];
+    }
+    const float inv_sum = 1.0f / row_sum;
+    for (int d = 0; d < D; ++d) {
+      float acc = 0.0f;
+      for (int l = 0; l < L; ++l) {
+        const size_t idx = kv_base + static_cast<size_t>(l) * D + d;
+        acc += probs[l] * __half2float(V[idx]);
+      }
+      out[q_base + d] = __float2half(acc * inv_sum);
+    }
+  }
+}
+
 // Check correctness: max_abs < 5e-2, max_rel < 2e-2
 static std::string check_correctness(const std::vector<__half>& a,
                                      const std::vector<__half>& b,
@@ -143,6 +224,8 @@ static std::string check_correctness(const std::vector<__half>& a,
   for (int i = 0; i < n; ++i) {
     float va = __half2float(a[i]);
     float vb = __half2float(b[i]);
+    if (!std::isfinite(va) || !std::isfinite(vb))
+      return "non-finite output detected";
     float abs_err = fabsf(va - vb);
     float rel_err = abs_err / fmaxf(fabsf(vb), 1e-3f);
     if (abs_err > max_abs) max_abs = abs_err;
@@ -164,6 +247,7 @@ static bool correctness_pass(const std::vector<__half>& a,
   // flagging that rounding noise.
   for (int i = 0; i < n; ++i) {
     float va = __half2float(a[i]), vb = __half2float(b[i]);
+    if (!std::isfinite(va) || !std::isfinite(vb)) return false;
     float abs_err = fabsf(va - vb);
     float rel_err = abs_err / fmaxf(fabsf(vb), 1e-3f);
     if (abs_err >= 5e-2f && rel_err >= 2e-2f) return false;
@@ -195,10 +279,12 @@ struct WeightReplicas {
 
   WeightReplicas() : n_copies(0), bytes_per(0) {}
 
-  void init(const __half* base, size_t bytes, int max_copies, int l2_bytes) {
+  void init(const __half* base, size_t bytes, int max_copies, int l2_bytes,
+            size_t replica_working_set_bytes = 0) {
     bytes_per = bytes;
     // N_copies = min(8, max(4, ceil(2 * L2 / weight_bytes)))
-    float raw = ceilf(2.0f * l2_bytes / static_cast<float>(bytes));
+    const size_t sizing_bytes = replica_working_set_bytes ? replica_working_set_bytes : bytes;
+    float raw = ceilf(2.0f * l2_bytes / static_cast<float>(sizing_bytes));
     n_copies = std::min(max_copies, std::max(4, static_cast<int>(raw)));
     if (n_copies < 1) n_copies = 1;
 
@@ -232,6 +318,18 @@ static void bench_f1(const std::string& variant, int dim, int batch,
   const int d_in  = dim;
   const int d_out = 14336;
 
+  // Kernel contracts enforced at the host boundary (cross-architecture):
+  // vectorized 128-bit loads require d_in % 8 == 0; the fused F1 kernel
+  // stages gamma in a fixed 4096-element shared buffer.
+  if (d_in % 8 != 0 || d < 1) {
+    fprintf(stderr, "F1: --dim must be a positive multiple of 8 (vectorized loads), got %d\n", dim);
+    exit(1);
+  }
+  if (d > 4096) {
+    fprintf(stderr, "F1: --dim must be <= 4096 (fused kernel shared-memory gamma buffer), got %d\n", dim);
+    exit(1);
+  }
+
   int l2 = l2_cache_bytes();
   cudaStream_t stream;
   CUDA_CHECK(cudaStreamCreate(&stream));
@@ -257,11 +355,13 @@ static void bench_f1(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaMemcpy(d_gamma, h_gamma.data(), d * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_W, h_W.data(), d_out * d_in * sizeof(__half), cudaMemcpyHostToDevice));
 
-  // Weight replicas (for W — the dominant weight)
+  // Weight replicas (for W — the dominant weight). Initialized for EVERY
+  // variant so t_stream, t_graph, and t_fused are measured under the same
+  // L2-residency conditions (a variant that reuses one allocation would see
+  // artificially warm cache).
   WeightReplicas w_repl;
   size_t w_bytes = static_cast<size_t>(d_out) * d_in * sizeof(__half);
-  if (variant != "fused")
-    w_repl.init(d_W, w_bytes, 8, l2);
+  w_repl.init(d_W, w_bytes, 8, l2);
 
   // Kernel setup
   KernelArgs args;
@@ -275,18 +375,28 @@ static void bench_f1(const std::string& variant, int dim, int batch,
 
   int gemv_grid = div_up(d_out, 8);
 
+  // Per-iteration launchers (rotate weight replicas identically per variant)
+  auto launch_fused_k = [&](int k) {
+    KernelArgs af = args; af.W = w_repl.get(k);
+    kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(af);
+  };
+  auto launch_unfused_k = [&](int k) {
+    KernelArgs ag = args_gemv; ag.W = w_repl.get(k);
+    kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
+    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(ag);
+  };
+
   // ---- Correctness check (G1) ----
   bool ok = true;
   std::string corr_msg = "SKIPPED";
   if (!skip_correctness) {
     std::vector<__half> h_gpu(d_out);
     if (variant == "fused") {
-      kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(args);
+      launch_fused_k(0);
     } else {
-      // Unfused: rmsnorm then gemv
-      kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_gemv);
+      launch_unfused_k(0);
     }
+    CUDA_CHECK_LAUNCH();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_gpu.data(), d_out_val, d_out * sizeof(__half), cudaMemcpyDeviceToHost));
     ok = correctness_pass(h_gpu, h_ref, d_out);
@@ -302,47 +412,40 @@ static void bench_f1(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaEventCreate(&ev_trial_start));
   CUDA_CHECK(cudaEventCreate(&ev_trial_stop));
 
-  // Warmup: 50 iterations
+  // Warmup: 50 iterations, rotating replicas like the timed loop
   for (int w = 0; w < 50; ++w) {
-    if (variant == "fused") {
-      kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    } else {
-      kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_gemv);
-    }
+    if (variant == "fused") launch_fused_k(w);
+    else                    launch_unfused_k(w);
   }
+  CUDA_CHECK_LAUNCH();
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  // Measure single invocation time for adaptive K
+  // Measure a small probe batch for adaptive K (less noise than one launch).
   float t_one;
   {
+    constexpr int probe_iters = 5;
     CUDA_CHECK(cudaEventRecord(ev_start, stream));
-    if (variant == "fused") {
-      kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    } else {
-      kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_gemv);
+    for (int i = 0; i < probe_iters; ++i) {
+      if (variant == "fused") launch_fused_k(i);
+      else                    launch_unfused_k(i);
     }
     CUDA_CHECK(cudaEventRecord(ev_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_stop));
     float ms;
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
-    t_one = ms * 1000.0f;
+    t_one = fmaxf(ms * 1000.0f / probe_iters, 1.0e-4f);
   }
 
   // Adaptive K
-  int K = std::max(200, static_cast<int>(ceilf(target_ms * 1000.0f / t_one)));
+  int K = adaptive_iters(target_ms, t_one);
   if (ncu_mode) K = 1;
 
-  // CUDA graph for unfused-graph variant
-  cudaGraph_t graph = nullptr;
-  cudaGraphExec_t graph_inst = nullptr;
-  if (variant == "unfused-graph" && !ncu_mode) {
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-    kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
-    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_gemv);
-    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-    CUDA_CHECK(cudaGraphInstantiate(&graph_inst, graph, nullptr, nullptr, 0));
+  // CUDA graphs for unfused-graph variant: one per weight replica, rotated
+  // at launch so graph replay sees the same residency as the other variants.
+  GraphSet graphs;
+  if (variant == "unfused-graph") {
+    capture_graph_per_replica(stream, w_repl.n_copies,
+                              [&](int i) { launch_unfused_k(i); }, &graphs);
   }
 
   // Timing loop: 30 trials
@@ -351,13 +454,13 @@ static void bench_f1(const std::string& variant, int dim, int batch,
     if (ncu_mode) {
       // Single invocation, no timing measurement
       if (variant == "fused") {
-        kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(args);
+        launch_fused_k(trial);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(trial), stream));
       } else {
-        kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(args_norm);
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_gemv);
+        launch_unfused_k(trial);
       }
+      CUDA_CHECK_LAUNCH();
       CUDA_CHECK(cudaStreamSynchronize(stream));
       fprintf(csv_fp, "%s,f1,%s,%d,%d,%d,%d,0,%.3f,%d,%ld\n",
               gpu_name().c_str(), variant.c_str(), dim, batch, trial, K,
@@ -369,21 +472,16 @@ static void bench_f1(const std::string& variant, int dim, int batch,
     CUDA_CHECK(cudaEventRecord(ev_trial_start, stream));
     for (int k = 0; k < K; ++k) {
       if (variant == "fused") {
-        kernels::fused::f1_kernel<<<gemv_grid, 256, 0, stream>>>(args);
+        launch_fused_k(k);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(k), stream));
       } else {
-        // unfused-stream: use weight replicas round-robin
-        __half* w_ptr = w_repl.get(k);
-        KernelArgs an = args_norm;
-        KernelArgs ag = args_gemv;
-        ag.W = w_ptr;
-        kernels::unfused::rmsnorm_kernel<<<1, 256, 0, stream>>>(an);
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(ag);
+        launch_unfused_k(k);
       }
     }
     CUDA_CHECK(cudaEventRecord(ev_trial_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_trial_stop));
+    CUDA_CHECK_LAUNCH();
 
     float ms_trial;
     CUDA_CHECK(cudaEventElapsedTime(&ms_trial, ev_trial_start, ev_trial_stop));
@@ -394,9 +492,7 @@ static void bench_f1(const std::string& variant, int dim, int batch,
             us_per, correctness_ok ? 1 : 0, static_cast<long>(now));
   }
 
-  // Cleanup
-  if (graph_inst) CUDA_CHECK(cudaGraphExecDestroy(graph_inst));
-  if (graph) CUDA_CHECK(cudaGraphDestroy(graph));
+  // Cleanup (GraphSet destructor frees graph execs)
   CUDA_CHECK(cudaEventDestroy(ev_start));
   CUDA_CHECK(cudaEventDestroy(ev_stop));
   CUDA_CHECK(cudaEventDestroy(ev_trial_start));
@@ -418,6 +514,11 @@ static void bench_f2(const std::string& variant, int dim, int batch,
   const int d_in  = dim;
   const int d_out = 14336;
 
+  if (d_in % 8 != 0 || d_in < 1) {
+    fprintf(stderr, "F2: --dim must be a positive multiple of 8 (vectorized loads), got %d\n", dim);
+    exit(1);
+  }
+
   int l2 = l2_cache_bytes();
   cudaStream_t stream;
   CUDA_CHECK(cudaStreamCreate(&stream));
@@ -428,22 +529,27 @@ static void bench_f2(const std::string& variant, int dim, int batch,
   std::vector<__half> h_ref(d_out);
   cpu_f2(h_xh, h_Wg, h_Wu, h_ref, d_in, d_out);
 
-  __half *d_xh, *d_Wg, *d_Wu, *d_out_val;
+  // d_g/d_u are persistent intermediates: the unfused pipeline must really
+  // materialize both GEMV outputs (the byte model counts them). Aliasing them
+  // onto d_out_val — as the timed path previously did — computes garbage and
+  // under-represents the real pipeline.
+  __half *d_xh, *d_Wg, *d_Wu, *d_out_val, *d_g, *d_u;
   CUDA_CHECK(cudaMalloc(&d_xh, d_in * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_Wg, d_out * d_in * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_Wu, d_out * d_in * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_out_val, d_out * sizeof(__half)));
+  CUDA_CHECK(cudaMalloc(&d_g, d_out * sizeof(__half)));
+  CUDA_CHECK(cudaMalloc(&d_u, d_out * sizeof(__half)));
 
   CUDA_CHECK(cudaMemcpy(d_xh, h_xh.data(), d_in * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_Wg, h_Wg.data(), d_out * d_in * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_Wu, h_Wu.data(), d_out * d_in * sizeof(__half), cudaMemcpyHostToDevice));
 
   size_t w_bytes = static_cast<size_t>(d_out) * d_in * sizeof(__half);
+  // Replicas for EVERY variant (residency parity across variants).
   WeightReplicas wg_repl, wu_repl;
-  if (variant != "fused") {
-    wg_repl.init(d_Wg, w_bytes, 8, l2);
-    wu_repl.init(d_Wu, w_bytes, 8, l2);
-  }
+  wg_repl.init(d_Wg, w_bytes, 8, l2, 2 * w_bytes);
+  wu_repl.init(d_Wu, w_bytes, 8, l2, 2 * w_bytes);
 
   KernelArgs args;
   args.x = d_xh; args.xh = d_xh; args.Wg = d_Wg; args.Wu = d_Wu;
@@ -451,27 +557,32 @@ static void bench_f2(const std::string& variant, int dim, int batch,
 
   int gemv_grid = div_up(d_out, 8);
 
+  // Per-iteration launchers. The unfused pipeline chains gate GEMV -> d_g,
+  // up GEMV -> d_u, SwiGLU(d_g, d_u) -> d_out_val, exactly as modeled.
+  auto launch_fused_k = [&](int k) {
+    KernelArgs af = args;
+    af.Wg = wg_repl.get(k); af.Wu = wu_repl.get(k); af.out = d_out_val;
+    kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(af);
+  };
+  auto launch_unfused_k = [&](int k) {
+    KernelArgs ak = args;
+    ak.W = wg_repl.get(k); ak.out = d_g;
+    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(ak);
+    ak.W = wu_repl.get(k); ak.out = d_u;
+    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(ak);
+    ak.g = d_g; ak.u = d_u; ak.out = d_out_val; ak.ff = d_out;
+    kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(ak);
+  };
+
   // Correctness
   bool correctness_ok = true;
   if (!skip_correctness) {
     std::vector<__half> h_gpu(d_out);
-    __half *d_g_temp = nullptr, *d_u_temp = nullptr;
-    if (variant == "fused") {
-      kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    } else {
-      CUDA_CHECK(cudaMalloc(&d_g_temp, d_out * sizeof(__half)));
-      CUDA_CHECK(cudaMalloc(&d_u_temp, d_out * sizeof(__half)));
-      args.W = d_Wg; args.out = d_g_temp;
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.W = d_Wu; args.out = d_u_temp;
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.g = d_g_temp; args.u = d_u_temp; args.out = d_out_val; args.ff = d_out;
-      kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args);
-    }
+    if (variant == "fused") launch_fused_k(0);
+    else                    launch_unfused_k(0);
+    CUDA_CHECK_LAUNCH();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_gpu.data(), d_out_val, d_out * sizeof(__half), cudaMemcpyDeviceToHost));
-    if (d_g_temp) CUDA_CHECK(cudaFree(d_g_temp));
-    if (d_u_temp) CUDA_CHECK(cudaFree(d_u_temp));
     correctness_ok = correctness_pass(h_gpu, h_ref, d_out);
   }
 
@@ -480,74 +591,50 @@ static void bench_f2(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaEventCreate(&ev_start)); CUDA_CHECK(cudaEventCreate(&ev_stop));
   CUDA_CHECK(cudaEventCreate(&ev_trial_start)); CUDA_CHECK(cudaEventCreate(&ev_trial_stop));
 
-  // Warmup
+  // Warmup, rotating replicas like the timed loop
   for (int w = 0; w < 50; ++w) {
-    if (variant == "fused") {
-      kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    } else {
-      args.W = d_Wg; args.out = d_out_val;  // just for warmup structure
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.W = d_Wu;
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.g = d_out_val; args.u = d_out_val; args.ff = d_out;
-      kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args);
-    }
+    if (variant == "fused") launch_fused_k(w);
+    else                    launch_unfused_k(w);
   }
+  CUDA_CHECK_LAUNCH();
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  // Measure single invocation
+  // Measure a small probe batch for adaptive K.
   float t_one;
   {
+    constexpr int probe_iters = 5;
     CUDA_CHECK(cudaEventRecord(ev_start, stream));
-    if (variant == "fused") {
-      kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    } else {
-      args.W = d_Wg; args.out = d_out_val;
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.W = d_Wu;
-      kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-      args.g = d_out_val; args.u = d_out_val; args.ff = d_out;
-      kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args);
+    for (int i = 0; i < probe_iters; ++i) {
+      if (variant == "fused") launch_fused_k(i);
+      else                    launch_unfused_k(i);
     }
     CUDA_CHECK(cudaEventRecord(ev_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_stop));
     float ms;
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
-    t_one = ms * 1000.0f;
+    t_one = fmaxf(ms * 1000.0f / probe_iters, 1.0e-4f);
   }
 
-  int K = std::max(200, static_cast<int>(ceilf(target_ms * 1000.0f / t_one)));
+  int K = adaptive_iters(target_ms, t_one);
   if (ncu_mode) K = 1;
 
-  cudaGraph_t graph = nullptr;
-  cudaGraphExec_t graph_inst = nullptr;
-  if (variant == "unfused-graph" && !ncu_mode) {
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-    args.W = d_Wg; args.out = d_out_val;
-    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    args.W = d_Wu;
-    kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-    args.g = d_out_val; args.u = d_out_val; args.ff = d_out;
-    kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args);
-    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-    CUDA_CHECK(cudaGraphInstantiate(&graph_inst, graph, nullptr, nullptr, 0));
+  GraphSet graphs;
+  if (variant == "unfused-graph") {
+    capture_graph_per_replica(stream, wg_repl.n_copies,
+                              [&](int i) { launch_unfused_k(i); }, &graphs);
   }
 
   time_t now = time(nullptr);
   for (int trial = 0; trial < trials; ++trial) {
     if (ncu_mode) {
       if (variant == "fused") {
-        kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(args);
+        launch_fused_k(trial);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(trial), stream));
       } else {
-        args.W = d_Wg; args.out = d_out_val;
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-        args.W = d_Wu;
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args);
-        args.g = d_out_val; args.u = d_out_val; args.ff = d_out;
-        kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args);
+        launch_unfused_k(trial);
       }
+      CUDA_CHECK_LAUNCH();
       CUDA_CHECK(cudaStreamSynchronize(stream));
       fprintf(csv_fp, "%s,f2,%s,%d,%d,%d,%d,0,%.3f,%d,%ld\n",
               gpu_name().c_str(), variant.c_str(), dim, batch, trial, K,
@@ -558,21 +645,16 @@ static void bench_f2(const std::string& variant, int dim, int batch,
     CUDA_CHECK(cudaEventRecord(ev_trial_start, stream));
     for (int k = 0; k < K; ++k) {
       if (variant == "fused") {
-        kernels::fused::f2_kernel<<<gemv_grid, 256, 0, stream>>>(args);
+        launch_fused_k(k);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(k), stream));
       } else {
-        KernelArgs args_k = args;
-        args_k.W = wg_repl.get(k); args_k.out = d_out_val;
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_k);
-        args_k.W = wu_repl.get(k);
-        kernels::unfused::gemv_kernel<<<gemv_grid, 256, 0, stream>>>(args_k);
-        args_k.g = d_out_val; args_k.u = d_out_val; args_k.ff = d_out;
-        kernels::unfused::swiglu_kernel<<<div_up(d_out, 256), 256, 0, stream>>>(args_k);
+        launch_unfused_k(k);
       }
     }
     CUDA_CHECK(cudaEventRecord(ev_trial_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_trial_stop));
+    CUDA_CHECK_LAUNCH();
 
     float ms_trial;
     CUDA_CHECK(cudaEventElapsedTime(&ms_trial, ev_trial_start, ev_trial_stop));
@@ -583,12 +665,11 @@ static void bench_f2(const std::string& variant, int dim, int batch,
             us_per, correctness_ok ? 1 : 0, static_cast<long>(now));
   }
 
-  if (graph_inst) CUDA_CHECK(cudaGraphExecDestroy(graph_inst));
-  if (graph) CUDA_CHECK(cudaGraphDestroy(graph));
   CUDA_CHECK(cudaEventDestroy(ev_start)); CUDA_CHECK(cudaEventDestroy(ev_stop));
   CUDA_CHECK(cudaEventDestroy(ev_trial_start)); CUDA_CHECK(cudaEventDestroy(ev_trial_stop));
   CUDA_CHECK(cudaFree(d_xh)); CUDA_CHECK(cudaFree(d_Wg));
   CUDA_CHECK(cudaFree(d_Wu)); CUDA_CHECK(cudaFree(d_out_val));
+  CUDA_CHECK(cudaFree(d_g)); CUDA_CHECK(cudaFree(d_u));
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
@@ -609,6 +690,12 @@ static void bench_f4(const std::string& variant, int dim, int batch,
     fprintf(stderr,
             "F4: --dim is the KV length and must be a positive multiple of "
             "128, got %d\n", dim);
+    exit(1);
+  }
+  // Kernel contracts (enforced here, not assumed): the F4 kernels require an
+  // even head dim <= 128 and D % 8 == 0 for vectorized loads.
+  if (D > 128 || D % 2 != 0 || D % 8 != 0) {
+    fprintf(stderr, "F4: head dim D=%d violates kernel contract (even, %%8==0, <=128)\n", D);
     exit(1);
   }
 
@@ -648,6 +735,14 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), H * L * D * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), H * L * D * sizeof(__half), cudaMemcpyHostToDevice));
 
+  // KV replicas for EVERY variant: K and V are the streamed operands (the
+  // weight analog), so all variants must rotate them identically for L2
+  // residency parity. K and V have equal size, so both sets share n_copies.
+  size_t kv_bytes = static_cast<size_t>(H) * L * D * sizeof(__half);
+  WeightReplicas k_repl, v_repl;
+  k_repl.init(d_K, kv_bytes, 8, l2, 2 * kv_bytes);
+  v_repl.init(d_V, kv_bytes, 8, l2, 2 * kv_bytes);
+
   KernelArgs args;
   args.q = d_q; args.K = d_K; args.V = d_V; args.out = d_out;
   args.scores = d_scores; args.probs = d_probs;
@@ -657,39 +752,51 @@ static void bench_f4(const std::string& variant, int dim, int batch,
 
   int scores_grid = div_up(H * L, 8);  // one warp per score element
 
+  // Per-iteration launchers rotating KV replicas identically per variant.
   // Fused variant = split-KV FlashDecode: 2 launches (partial + merge),
   // scores/probs never touch global memory.
-  auto launch_fused = [&]() {
-    kernels::fused::f4_partial_kernel<<<H * n_splits, 256, 0, stream>>>(args);
-    kernels::fused::f4_reduce_kernel<<<H, D, 0, stream>>>(args);
+  auto launch_fused_k = [&](int k) {
+    KernelArgs ak = args;
+    ak.K = k_repl.get(k); ak.V = v_repl.get(k);
+    kernels::fused::f4_partial_kernel<<<H * n_splits, 256, 0, stream>>>(ak);
+    kernels::fused::f4_reduce_kernel<<<H, D, 0, stream>>>(ak);
+  };
+  auto launch_unfused_k = [&](int k) {
+    KernelArgs ak = args;
+    ak.K = k_repl.get(k); ak.V = v_repl.get(k);
+    kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(ak);
+    kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(ak);
+    kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(ak);
   };
 
   bool correctness_ok = true;
   if (!skip_correctness) {
-    std::vector<__half> h_gpu(H * D), h_fused(H * D);
+    std::vector<__half> h_gpu(H * D), h_fused(H * D), h_cpu(H * D);
+    cpu_f4(h_q, h_K, h_V, h_cpu, H, L, D);
 
     // Unfused path
-    kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-    kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-    kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
+    launch_unfused_k(0);
+    CUDA_CHECK_LAUNCH();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_gpu.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
 
     // Fused path (split-KV)
-    args.out = d_out;
-    launch_fused();
+    launch_fused_k(0);
+    CUDA_CHECK_LAUNCH();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_fused.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
 
-    // Single-block reference kernel as a second witness
+    // Single-block GPU reference kernel remains a second implementation
+    // witness, but the independent CPU result is the correctness authority.
     std::vector<__half> h_ref(H * D);
     kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+    CUDA_CHECK_LAUNCH();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_ref.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
 
-    // Split-KV must match both the unfused chain and the reference kernel
-    correctness_ok = correctness_pass(h_fused, h_gpu, H * D) &&
-                     correctness_pass(h_fused, h_ref, H * D);
+    correctness_ok = correctness_pass(h_gpu, h_cpu, H * D) &&
+                     correctness_pass(h_fused, h_cpu, H * D) &&
+                     correctness_pass(h_ref, h_cpu, H * D);
   }
 
   // Timing
@@ -697,83 +804,70 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaEventCreate(&ev_start)); CUDA_CHECK(cudaEventCreate(&ev_stop));
   CUDA_CHECK(cudaEventCreate(&ev_trial_start)); CUDA_CHECK(cudaEventCreate(&ev_trial_stop));
 
-  // Warmup
+  // Warmup, rotating replicas like the timed loop
   for (int w = 0; w < 50; ++w) {
-    if (variant == "fused") {
-      launch_fused();
-    } else {
-      kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-      kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-      kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
-    }
+    if (variant == "fused") launch_fused_k(w);
+    else                    launch_unfused_k(w);
   }
+  CUDA_CHECK_LAUNCH();
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  // Measure single
+  // Measure a small probe batch for adaptive K.
   float t_one;
   {
+    constexpr int probe_iters = 5;
     CUDA_CHECK(cudaEventRecord(ev_start, stream));
-    if (variant == "fused") {
-      launch_fused();
-    } else {
-      kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-      kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-      kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
+    for (int i = 0; i < probe_iters; ++i) {
+      if (variant == "fused") launch_fused_k(i);
+      else                    launch_unfused_k(i);
     }
     CUDA_CHECK(cudaEventRecord(ev_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_stop));
     float ms;
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
-    t_one = ms * 1000.0f;
+    t_one = fmaxf(ms * 1000.0f / probe_iters, 1.0e-4f);
   }
 
-  int K = std::max(200, static_cast<int>(ceilf(target_ms * 1000.0f / t_one)));
+  int K = adaptive_iters(target_ms, t_one);
   if (ncu_mode) K = 1;
 
-  cudaGraph_t graph = nullptr;
-  cudaGraphExec_t graph_inst = nullptr;
-  if (variant == "unfused-graph" && !ncu_mode) {
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-    kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-    kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-    kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
-    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-    CUDA_CHECK(cudaGraphInstantiate(&graph_inst, graph, nullptr, nullptr, 0));
+  GraphSet graphs;
+  if (variant == "unfused-graph") {
+    capture_graph_per_replica(stream, k_repl.n_copies,
+                              [&](int i) { launch_unfused_k(i); }, &graphs);
   }
 
   time_t now = time(nullptr);
   for (int trial = 0; trial < trials; ++trial) {
     if (ncu_mode) {
       if (variant == "fused") {
-        launch_fused();
+        launch_fused_k(trial);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(trial), stream));
       } else {
-        kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-        kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-        kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
+        launch_unfused_k(trial);
       }
+      CUDA_CHECK_LAUNCH();
       CUDA_CHECK(cudaStreamSynchronize(stream));
-	      fprintf(csv_fp, "%s,f4,%s,%d,%d,%d,%d,0,%.3f,%d,%ld\n",
-	              gpu_name().c_str(), variant.c_str(), dim, batch, trial, K,
-	              0.0, correctness_ok ? 1 : 0, static_cast<long>(now));
+      fprintf(csv_fp, "%s,f4,%s,%d,%d,%d,%d,0,%.3f,%d,%ld\n",
+              gpu_name().c_str(), variant.c_str(), dim, batch, trial, K,
+              0.0, correctness_ok ? 1 : 0, static_cast<long>(now));
       continue;
     }
 
     CUDA_CHECK(cudaEventRecord(ev_trial_start, stream));
     for (int k = 0; k < K; ++k) {
       if (variant == "fused") {
-        launch_fused();
+        launch_fused_k(k);
       } else if (variant == "unfused-graph") {
-        CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
+        CUDA_CHECK(cudaGraphLaunch(graphs.get(k), stream));
       } else {
-        kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
-        kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-        kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
+        launch_unfused_k(k);
       }
     }
     CUDA_CHECK(cudaEventRecord(ev_trial_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_trial_stop));
+    CUDA_CHECK_LAUNCH();
 
     float ms_trial;
     CUDA_CHECK(cudaEventElapsedTime(&ms_trial, ev_trial_start, ev_trial_stop));
@@ -784,8 +878,6 @@ static void bench_f4(const std::string& variant, int dim, int batch,
             us_per, correctness_ok ? 1 : 0, static_cast<long>(now));
   }
 
-  if (graph_inst) CUDA_CHECK(cudaGraphExecDestroy(graph_inst));
-  if (graph) CUDA_CHECK(cudaGraphDestroy(graph));
   CUDA_CHECK(cudaEventDestroy(ev_start)); CUDA_CHECK(cudaEventDestroy(ev_stop));
   CUDA_CHECK(cudaEventDestroy(ev_trial_start)); CUDA_CHECK(cudaEventDestroy(ev_trial_stop));
   CUDA_CHECK(cudaFree(d_q)); CUDA_CHECK(cudaFree(d_K)); CUDA_CHECK(cudaFree(d_V));
@@ -839,6 +931,18 @@ int main(int argc, char** argv) {
 
   if (!csv_path) {
     fprintf(stderr, "Usage: bench_variant --csv <path> [options...]\n");
+    return 1;
+  }
+
+  if (batch != 1) {
+    fprintf(stderr,
+            "ERROR: --batch=%d rejected. All kernels are unbatched (B=1); "
+            "labeling unbatched runs with batch>1 would fabricate batch-sweep "
+            "data. Implement batched kernels before sweeping batch.\n", batch);
+    return 1;
+  }
+  if (trials <= 0 || !std::isfinite(target_ms) || target_ms <= 0.0f) {
+    fprintf(stderr, "ERROR: --trials must be positive and --target-ms must be finite and positive\n");
     return 1;
   }
 

@@ -71,14 +71,20 @@ def _build_f2(dim: int, batch: int) -> tuple[Sequence, dict, list[dict]]:
 
     seq = Sequence("f2")
 
+    # Three declared stages so BOTH intermediates (g and u) are visible to the
+    # byte model — the unfused pipeline really materializes both. Parameters
+    # named after earlier stages ("gate", "up") bind to those stages' outputs.
     @seq.stage
     def gate(xh, Wg):
         return torch.nn.functional.linear(xh, Wg)
 
     @seq.stage
-    def up_and_swiglu(g, Wu, xh):
-        u = torch.nn.functional.linear(xh, Wu)
-        return torch.nn.functional.silu(g) * u
+    def up(xh, Wu):
+        return torch.nn.functional.linear(xh, Wu)
+
+    @seq.stage
+    def swiglu(up, gate):
+        return torch.nn.functional.silu(gate) * up
 
     inputs = {"xh": xh, "Wg": Wg, "Wu": Wu}
 

@@ -12,6 +12,10 @@ def test_summarize():
 
     with pytest.raises(ValueError, match="requires at least one sample"):
         summarize([])
+    with pytest.raises(ValueError, match="finite"):
+        summarize([1.0, np.nan])
+    with pytest.raises(ValueError, match="one-dimensional"):
+        summarize([[1.0, 2.0]])
 
 def test_bootstrap_diff_ci():
     rng = np.random.default_rng(42)
@@ -28,3 +32,11 @@ def test_bootstrap_diff_ci():
 
     with pytest.raises(ValueError, match="requires non-empty samples"):
         bootstrap_diff_ci([], [1.0])
+    with pytest.raises(ValueError, match="finite"):
+        bootstrap_diff_ci([np.inf], [1.0])
+    with pytest.raises(ValueError, match="n_resamples"):
+        bootstrap_diff_ci([1.0], [1.0], n_resamples=0)
+    with pytest.raises(ValueError, match="ci must"):
+        bootstrap_diff_ci([1.0], [1.0], ci=1.0)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        bootstrap_diff_ci([[1.0]], [1.0])

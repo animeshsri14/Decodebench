@@ -33,6 +33,60 @@ def test_sequence_trace_bytes():
     assert traces[0].write == x.nbytes
 
 @pytest.mark.gpu
+def test_sequence_trace_fanout_and_unsafe_tensor_forms():
+    x = torch.randn(16, device="cuda")
+    seq = Sequence("fanout")
+
+    @seq.stage
+    def source(x):
+        return x.clone()
+
+    @seq.stage
+    def left(source):
+        return source + 1
+
+    @seq.stage
+    def right(source):
+        return source + 2
+
+    @seq.stage
+    def merge(left, right):
+        return left + right
+
+    traces = seq.trace({"x": x})
+    assert traces[0].consumers == 2
+
+    alias = Sequence("alias")
+    @alias.stage
+    def inplace(x):
+        return x.add_(1)
+    with pytest.raises(ValueError, match="aliases"):
+        alias.trace({"x": x.clone()})
+
+    strided = Sequence("strided")
+    @strided.stage
+    def copy(x):
+        return x.clone()
+    with pytest.raises(ValueError, match="non-contiguous"):
+        strided.trace({"x": torch.ones(4, 4, device="cuda").t()})
+
+    hidden_weight = torch.ones(16, device="cuda")
+    closure = Sequence("closure")
+    @closure.stage
+    def hidden(x):
+        return x * hidden_weight
+    with pytest.raises(ValueError, match="captures tensor"):
+        closure.trace({"x": x})
+
+@pytest.mark.gpu
+def test_replica_shape_mismatch_rejected():
+    with pytest.raises(ValueError, match="does not match replica 0"):
+        Sequence._validate_replicas([
+            {"x": torch.ones(2, device="cuda")},
+            {"x": torch.ones(3, device="cuda")},
+        ])
+
+@pytest.mark.gpu
 def test_cuda_graph_capture_and_replay():
     x = torch.randn(1, 256, dtype=torch.float16, device="cuda")
     y = torch.zeros(1, 256, dtype=torch.float16, device="cuda")

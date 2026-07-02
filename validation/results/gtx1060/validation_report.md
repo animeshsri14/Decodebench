@@ -1,4 +1,8 @@
 # DecodeBench Validation Report
+
+> **HISTORICAL PARTIAL RUN:** This development-GPU report lacks the current
+> complete NCU and validation gates. It is retained for diagnostics only and is
+> not research validation evidence.
 GPU: GTX 1060 6GB (SM61) - local development machine
 Generated: 2026-06-12T00:28:42.842693
 

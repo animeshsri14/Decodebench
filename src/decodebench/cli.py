@@ -16,7 +16,7 @@ def parse_comma_list(s: str) -> list[int]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="decodebench",
-        description="DecodeBench: isolate launch overhead from analytic byte ceiling in LLM decode fusion."
+        description="DecodeBench: compare launch overhead with an analytic eliminable-byte estimate in LLM decode fusion."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         
         sweep_rows = []
         # Header for sweep CSV:
-        # demo,dim,batch,trials,t_stream_us,t_graph_us,delta_launch_us,b_ceiling_us,bound,total_bytes,eliminable_bytes,ci_lo,ci_hi
+        # demo,dim,batch,trials,t_stream_us,t_graph_us,delta_launch_us,b_bytes_est_us,bound,total_bytes,eliminable_bytes,ci_lo,ci_hi
         
         for b in args.batch:
             print(f"Sweeping {args.name} dim={args.dim} batch={b}...")
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 
             sweep_rows.append([
                 args.name, args.dim, b, args.trials,
-                f"{v.t_stream:.2f}", f"{v.t_graph:.2f}", f"{v.delta_launch:.2f}", f"{v.b_ceiling:.2f}",
+                f"{v.t_stream:.2f}", f"{v.t_graph:.2f}", f"{v.delta_launch:.2f}", f"{v.b_bytes_est:.2f}",
                 v.bound, v.total_bytes, v.eliminable_bytes, f"{ci_lo:.2f}", f"{ci_hi:.2f}"
             ])
                 
@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                 w = csv.writer(f)
                 w.writerow([
                     "demo", "dim", "batch", "trials", "t_stream_us", "t_graph_us",
-                    "delta_launch_us", "b_ceiling_us", "bound", "total_bytes",
+                    "delta_launch_us", "b_bytes_est_us", "bound", "total_bytes",
                     "eliminable_bytes", "ci_lo", "ci_hi"
                 ])
                 w.writerows(sweep_rows)

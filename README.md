@@ -8,8 +8,8 @@
 
 When you fuse a pipeline of decode kernels (e.g., RMSNorm → GEMV), you observe a speedup. DecodeBench decomposes that speedup into two terms:
 
-- **Δ_launch:** time saved by eliminating CUDA kernel launches - already captured by CUDA Graphs on any production engine.
-- **B:** an analytic upper bound on the time that *could* be saved by eliminating intermediate DRAM traffic - and nothing more.
+- **Δ_launch:** time saved by eliminating CUDA kernel launches - already captured by CUDA Graphs on any production engine. Measured.
+- **B:** a *proportional byte-time estimate* — the time the eliminable intermediate DRAM traffic would take at the workload's average byte throughput (total declared bytes / t_graph). **B is not a mathematical upper bound**: the linear-scaling assumption fails for launch-, latency-, compute-, or occupancy-bound kernels, cache-resident traffic, and serialized stage boundaries, and measured fusion gains can exceed B.
 
 The distinction matters: CUDA Graphs can already eliminate launch overhead without any kernel fusion at all. Fusion that merely hides launches may be redundant. Fusion that eliminates intermediate bytes provides a genuine, additive gain beyond what CUDA Graphs alone can achieve.
 
@@ -20,9 +20,10 @@ The distinction matters: CUDA Graphs can already eliminate launch overhead witho
 Running `decodebench demo f1` on an L4 GPU produces:
 ```
 CUDA Graphs eliminate 8.34 us here (95% CI [8.12, 8.56]) (measured).
-Fusion can save at most 0.02 us from eliminable intermediate bytes (analytic byte ceiling).
+Eliminable intermediate bytes correspond to ~0.02 us at this workload's average byte throughput (analytic proportional estimate, NOT a strict bound).
 Floor with graphs on (t_graph): 12.45 us.
-Verdict: LAUNCH-BOUND - enable CUDA Graphs; hand-fusion is not worth the maintenance cost.
+Dominant term: launch overhead (measured) (delta_launch 8.34 us vs B 0.02 us).
+Verdict: LAUNCH-BOUND -> enable CUDA Graphs; hand-fusion is not worth the maintenance cost.
 ```
 
 ---
@@ -46,9 +47,12 @@ import decodebench as db
 
 seq = db.Sequence("rmsnorm-gate")
 
-# A stage returns its output tensor. For every stage after the first, the
-# first parameter is bound to the previous stage's output; the remaining
-# parameters are looked up by name in the `inputs` dict passed to profile().
+# A stage returns its output tensor. Parameters resolve by name, in order:
+# (1) an earlier stage's output whose STAGE NAME matches the parameter name,
+# (2) an entry in the `inputs` dict, then (3) for the first parameter of a
+# non-first stage only, the previous stage's output (positional fallback).
+# Name-based binding lets non-chain dataflow (e.g. F2's gate/up feeding
+# SwiGLU) declare every real intermediate to the byte model.
 @seq.stage
 def rmsnorm(x, g):
     var = x.float().pow(2).mean(dim=-1, keepdim=True)
@@ -71,8 +75,9 @@ print(report.render())
 
 `seq.profile()` times the chain twice - once as plain stream launches, once
 replayed from a captured CUDA Graph - and returns a `Report`. `report.verdict()`
-decomposes the stream-vs-graph gap into Δ_launch and the analytic byte ceiling B,
-then classifies the fusion; `report.render()` is shorthand for printing it.
+measures the stream-vs-graph launch term Δ_launch and estimates the proportional
+time associated with eliminable bytes (B), then classifies the analytic byte
+fraction; `report.render()` is shorthand for printing it.
 
 ---
 
@@ -96,10 +101,12 @@ decodebench demo f4
 
 ## Limitations
 
-- **Linear chains only.** Each stage consumes exactly one predecessor's output. Branchy dataflow - QKV split, RoPE on a subset of heads - is not yet supported.
-- **Single output per stage.** Each stage writes exactly one output tensor; multi-output stages are not modeled.
+- **Single-output stages in a fixed execution order.** Stages may consume any earlier stage's output by name, including fan-in and fan-out, and consumer multiplicity is included in eliminable-byte accounting. Each stage still writes exactly one tensor; multi-output stages — QKV split or RoPE returning rotation pairs — are not supported.
 - **Byte accounting at stage boundaries.** Stage-internal temporaries that are read and written within a single stage are not tracked. A warning is emitted when a stage's internal footprint suggests significant hidden traffic.
-- **B bounds only the byte-elimination component, not total fusion gain.** B = Bytes_eliminable / BW_measured captures the upper bound on time saved by eliminating intermediate reads and writes. It does *not* include computation reuse, occupancy improvements, reduced register pressure, or any other fusion effects. The residual `residual_us = (t_graph − t_fused) − B` isolates the unexplained portion.
+- **B estimates only the byte-elimination component, not total fusion gain — and it is an estimate, not a bound.** B = Bytes_eliminable / BW_avg (with BW_avg = total declared bytes / t_graph) assumes runtime scales linearly with declared bytes and that eliminated intermediates see the same effective bandwidth as dominant weight/KV traffic. It does *not* include computation reuse, occupancy improvements, reduced register pressure, elimination of inter-kernel serialization, or any other fusion effects; measured gains can exceed B (observed on T4 F4). The residual `residual_us = (t_graph − t_fused) − B` isolates the unexplained portion.
+- **The launch-bound / byte-bound verdict classifies the analytic byte fraction**, not the empirically dominant source of gain. The `Verdict.dominant` field and render output additionally compare the *measured* Δ_launch against B, and the verdict cautions when the two disagree.
+- **Byte accounting uses logical `tensor.nbytes` at stage boundaries.** Non-contiguous arguments/outputs, aliased or in-place outputs, and directly closure-captured tensor parameters are rejected with actionable errors. Dtype-conversion temporaries, tensors hidden inside containers/objects, and library-internal workspaces remain unmodeled; the internal-allocation warning is heuristic because allocator statistics are not DRAM traffic. Keep stages to single ops for the model to be meaningful.
+- **Every non-final stage output must be consumed by a later stage** (by naming a parameter after the producing stage, or positionally). Unconsumed intermediates now raise an error instead of silently corrupting the eliminable-byte count.
 
 ---
 
@@ -108,33 +115,33 @@ decodebench demo f4
 These hypotheses were registered before any measurement runs:
 
 - **H1:** F1 (RMSNorm→GEMV) and F2 (Gate/Up+SwiGLU) are **launch-bound** on all four GPUs: T4, L4, A100, RTX Pro 6000. Their measured Δ_launch explains ≥ 80% of the unfused-to-fused gap.
-- **H2:** F4 (Attention scores+softmax+V) is **byte-bound** on all four GPUs. Its B bound accounts for ≥ 80% of the unfused-to-fused gap.
+- **H2:** F4 (Attention scores+softmax+V) is **byte-bound** on all four GPUs. Its B estimate accounts for ≥ 80% of the unfused-to-fused gap.
 - **H3:** Δ_launch (in microseconds) grows relative to t_graph as GPU bandwidth rises, since byte-elimination savings shrink with faster memory while launch overhead remains roughly constant across generations.
 - **H4:** Three independent correctness checks pass within stated tolerances:
-  - **(a)** Numerical correctness: fused and unfused outputs match within 1×10⁻³ relative error (L∞ norm).
+  - **(a)** Numerical correctness: every output satisfies an allclose-style mixed tolerance, `abs_error < 5e-2 OR rel_error < 2e-2` (FP16 storage, FP32 accumulation). F4 is checked independently against a scalar CPU attention reference as well as two GPU witnesses.
   - **(b)** Monotonicity: t_fused ≤ t_graph for all measured configurations. *Note: as of 2026-07-02 this holds on T4 for all three fusions, including F4, using the throughput-tuned split-KV FlashDecode kernel; the earlier single-block f4.cu (kept as a correctness reference) did not satisfy it. L4 results predate the tuned kernel.*
-  - **(c)** Decomposition consistency: |(t_graph − t_fused) − (Δ_launch + B)| ≤ 2% of t_graph.
+  - **(c)** Decomposition consistency: |(t_stream − t_fused) − (Δ_launch + B)| ≤ 2% of t_graph. *(Wording fixed 2026-07: the earlier text mixed baselines — Δ_launch + B decomposes the stream-to-fused gap, so the consistency check must be stated against t_stream.)*
 
 ---
 
-## Validation status (as of 2026-07-02)
+## Validation status (as of 2026-07-02, revised)
 
-Two of the four GPUs are measured; **A100 and RTX Pro 6000 runs will follow**.
+**No GPU currently holds a valid PASS under the strengthened validation gates.** The 2026-07 revision (external review) made the pipeline fail-closed, restored the pre-registered hypotheses as enforced gates, made the F4 byte-delta gate two-sided, fixed the F2 byte model (it previously omitted the `u` intermediate), and equalized weight/KV cache residency across benchmark variants. Earlier reports claiming "33/33 PASS" were produced by weaker gates (favorable-direction violations reclassified as warnings, warnings counted as passes, missing data skipped) and by a benchmark with variant-dependent cache residency — **those results are retracted as validation evidence and all GPUs require re-runs**. The retained per-GPU data remains useful as raw measurements.
 
 | GPU | Status | Notes |
 |-----|--------|-------|
-| L4 (SM89, Ada) | COMPLETE - 33/33 PASS | F1/F2 launch-bound; F4 byte-bound signal. **Predates the tuned split-KV F4 kernel and F4 `--dim`=KV-length semantics — its F4 rows are not comparable to newer runs.** |
-| T4 (SM75, Turing) | 33/33 PASS (2 WARN) | Re-run 2026-07-02 with the throughput-tuned split-KV F4 kernel and tuned unfused attention baseline. G1 18/18. F4 Check (a) passes as **WARN "exceeds model"** at both dims (fused wins by more than Δ_launch+B — favorable direction); F4 Check (b) passes via the **eliminated-delta gate** (6.8 MB ≥ 2.1 MB analytic) with the T4 counter-excess ratio kept as a diagnostic. Gate revisions dated 2026-07-02 in `compare.py` — see outcome notes. |
+| L4 (SM89, Ada) | re-run required | Historical run predates the tuned split-KV F4 kernel, the F4 `--dim`=KV-length semantics, the F2 byte-model fix, and residency parity. |
+| T4 (SM75, Turing) | re-run required; **H2 refuted on historical data** | On the 2026-07-02 data, B explains ~20% of the F4 fusion gap (pre-registered: ≥80%); the measured eliminated delta (6.8 MB) is >3× the analytic value (2.1 MB). Under the current gates these are FAILs, honestly reported. |
 | A100 (SM80, Ampere) | pending | - |
 | RTX Pro 6000 (SM120, Blackwell) | pending | - |
 
 **Outcome notes and caveats (T4, 2026-07-02 run):**
 
-- **H1 (F1/F2 launch-bound):** holds on L4 and T4. Fused F1/F2 remain slower than the graph baseline (fusion is not worth it beyond launch elimination), Δ_launch > 0.
+- **H1 (F1/F2 launch-bound):** historical L4/T4 data has the expected directional signal, but it is not validation evidence after the accounting and residency fixes; fresh runs are required.
 - **H4(b) monotonicity now holds for F4, non-vacuously:** the split-KV FlashDecode fused kernel beats the CUDA-graph baseline wall-clock at both KV lengths (L=2048: 180 vs 213 µs; L=4096: 370 vs 438 µs, ~16% faster). Both the fused kernel *and* the unfused attention baseline (`attn_scores`, `attn_v`) were tuned to the same coalesced-streaming idioms, so the comparison isolates fusion effects rather than kernel tuning quality.
-- **H2 (F4 byte-bound) is only partially supported on T4 — Check (a) reports WARN "exceeds model" (favorable direction).** The fused win *exceeds* the modeled bound Δ_launch + B (gap 68 µs vs modeled ~21 µs at L=4096). B accounts for ~20% of the gap, not the pre-registered ≥80%. The dominant unmodeled term is **elimination of inter-kernel serialization**: the low-parallelism softmax stage (H=32 blocks) and per-boundary drain/ramp that graph replay cannot remove. This is exactly Limitation "B only bounds byte-elimination" — now a *measured* effect, not just a caveat. Among the *modeled* terms, B (13.3 µs) still dominates Δ_launch (8.1 µs), so the byte-vs-launch classification stands; the total-gain decomposition does not. *Gate revision 2026-07-02: this outcome was originally reported as FAIL; it is now WARN (counts as PASS) because it is a favorable, attributed bound violation on a correctness-gated config — the H2 refutation itself remains recorded here.*
-- **Check (b) F4 passes via the eliminated-delta gate; absolute ratios stay diagnostic (0.71/0.76).** T4's DRAM counters report ~1.3–1.4× the analytic lower bound on all KV-streaming kernels — equally on both variants, so the excess cancels in the delta. The *measured eliminated delta* (97.6 − 90.8 = 6.8 MB) exceeds the analytic eliminable bytes (2.1 MB), which is the quantity the byte-elimination hypothesis is actually about. *Gate revision 2026-07-02: F4's gate changed from absolute-totals ±20% to the delta test; the totals ratio remains printed in every report.*
-- **F4's byte-elimination ceiling is small by construction:** for single-query decode the eliminable intermediate (scores+probs, `O(L)`) versus KV traffic (`O(L·D)`) fixes the eliminable fraction at **4/D ≈ 3% of runtime, independent of sequence length**. Increasing KV/context length does **not** create a crossover via bytes alone. The measured F4 wall-clock win (~16%) is real but comes mostly from serialization elimination, not bytes — do not cite it as a byte-elimination result.
+- **H2 (F4 byte-bound) is refuted by the historical T4 decomposition.** The fused win exceeds Δ_launch + B (gap ~80 µs vs modeled ~22 µs at L=4096), and B accounts for ~17–20% rather than the pre-registered ≥80%. The likely contributors include elimination of low-parallelism stage boundaries and the split-KV algorithm's different scheduling. Under the current gates this is a FAIL of H2, H4(c), and Check (a), not a favorable warning.
+- **Check (b) F4: the measured eliminated delta (97.6 − 90.8 = 6.8 MB) is about 6.6× the current analytic delta (~1.03 MB after subtracting split-KV partial-buffer traffic), which FAILS the two-sided gate.** A one-sided "delta ≥ analytic" gate validates nothing about model accuracy, so it was removed. Absolute totals remain diagnostics because the fused split-KV algorithm changes scheduling and cache behavior as well as intermediate traffic.
+- **F4's declared-byte fraction is small by construction:** for single-query decode the eliminable intermediate (`O(L)`) versus KV traffic (`O(L·D)`) fixes the analytic fraction near **4/D ≈ 3%**, independent of sequence length. This is a byte ratio, not a guaranteed runtime fraction. The historical ~16% wall-clock win therefore cannot be attributed to bytes alone.
 
 ---
 
@@ -201,7 +208,7 @@ print(report.render())          # report.verdict() returns the Verdict object
 | `total_bytes(traces)` | Total unfused memory traffic |
 | `compute_verdict(...)` | Classify fusion as launch-bound or byte-bound |
 | `report.verdict()` | Return the `Verdict` object from a profiling `Report` |
-| `summarize(data)` | Compute mean, median, std, and 95% CI |
+| `summarize(data)` | Compute median, p25, p75, and IQR |
 | `bootstrap_diff_ci(a, b)` | Bootstrap 95% CI for the difference of two timing samples |
 
 ---
@@ -212,19 +219,15 @@ The `Verdict.render()` method produces a multi-line text block with:
 
 ```
 CUDA Graphs eliminate X.XX us here (95% CI [lo, hi]) (measured).
-Fusion can save at most X.XX us from eliminable intermediate bytes (analytic byte ceiling).
+Eliminable intermediate bytes correspond to ~X.XX us at this workload's average byte throughput (analytic proportional estimate, NOT a strict bound).
 Floor with graphs on (t_graph): X.XX us.
-Verdict: LAUNCH-BOUND - enable CUDA Graphs; hand-fusion is not worth the maintenance cost.
+Dominant term: launch overhead (measured) (delta_launch X.XX us vs B X.XX us).
+Verdict: LAUNCH-BOUND -> enable CUDA Graphs first; the declared byte fraction is below the configured fusion threshold.
 ```
 
 For byte-bound fusions:
 ```
-Verdict: BYTE-BOUND - fusion provides a genuine gain beyond CUDA Graphs; worth the implementation cost.
-```
-
-When t_graph − t_fused < 2×B but B/t_graph > θ, the verdict is **MIXED**:
-```
-Verdict: MIXED - both launch and byte terms contribute; profile the fused kernel to confirm.
+Verdict: BYTE-BOUND -> the declared byte fraction clears the threshold; benchmark a representative fused kernel before committing.
 ```
 
 ---

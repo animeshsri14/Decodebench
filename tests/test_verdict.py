@@ -12,12 +12,17 @@ def test_verdict_launch_bound():
     )
     assert v.bound == "launch-bound"
     assert v.delta_launch == 4.0
-    assert abs(v.b_ceiling - (16384 / (33595392 / 16.0))) < 1e-6
-    
+    assert abs(v.b_bytes_est - (16384 / (33595392 / 16.0))) < 1e-6
+    # Deprecated alias still works
+    assert v.b_ceiling == v.b_bytes_est
+    # Measured launch term dominates the byte estimate here
+    assert v.dominant == "launch"
+
     # Check render text
     r = v.render()
     assert "CUDA Graphs eliminate 4.00 us here" in r
-    assert "from eliminable intermediate bytes" in r
+    assert "Eliminable intermediate bytes correspond to" in r
+    assert "NOT a strict bound" in r
     assert "Verdict: LAUNCH-BOUND" in r
 
 def test_verdict_threshold_respected():
@@ -41,12 +46,24 @@ def test_verdict_f4_ratio_regression():
     )
     # Ratio = 524288 / 17317888 = 3.027% which is > 1% threshold
     assert v.bound == "byte-bound"
+    # delta_launch (4 us) far exceeds B (~0.48 us): render must caution that the
+    # byte-bound label is an analytic fraction, not the measured dominant term.
+    assert v.dominant == "launch"
+    assert "Caution: measured launch savings exceed the byte estimate" in v.render()
 
 def test_verdict_invalid_inputs():
     with pytest.raises(ValueError, match="t_graph must be positive"):
         compute_verdict(t_stream=10.0, t_graph=0.0, total_bytes=100, eliminable_bytes=10)
-    with pytest.raises(ValueError, match="t_fused must be positive"):
+    with pytest.raises(ValueError, match="t_fused must be finite and positive"):
         compute_verdict(t_stream=10.0, t_graph=8.0, total_bytes=100, eliminable_bytes=10, t_fused=-1.0)
+    with pytest.raises(ValueError, match="must be finite"):
+        compute_verdict(t_stream=float("nan"), t_graph=8.0, total_bytes=100, eliminable_bytes=10)
+    with pytest.raises(ValueError, match="byte_threshold"):
+        compute_verdict(t_stream=10.0, t_graph=8.0, total_bytes=100,
+                        eliminable_bytes=10, byte_threshold=-0.1)
+    with pytest.raises(ValueError, match="ordered bounds"):
+        compute_verdict(t_stream=10.0, t_graph=8.0, total_bytes=100,
+                        eliminable_bytes=10, delta_launch_ci=(2.0, 1.0))
 
 def test_verdict_with_fused():
     v = compute_verdict(

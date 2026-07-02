@@ -22,7 +22,12 @@ __global__ void f1_kernel(KernelArgs args) {
   const int row          = blockIdx.x * 8 + (threadIdx.x / 32);
   const int lane         = threadIdx.x % 32;
   const int warp_id      = threadIdx.x / 32;
-  if (row >= d_out) return;
+  // No early return here: every thread must reach __syncthreads() and the
+  // block-wide reduction below, or a partial last block (d_out not a
+  // multiple of 8) would diverge on the barriers. Row validity only gates
+  // the per-row GEMV and the output write; the guard is warp-uniform
+  // (row depends only on warp_id), so warp_reduce_sum stays full-warp.
+  const bool row_valid   = (row < d_out);
 
   // --- Step 1: Load gamma into shared memory (d elements, <= 4096 = 8 KB) ---
   __shared__ __half gamma_shared[4096];  // max d
@@ -42,6 +47,7 @@ __global__ void f1_kernel(KernelArgs args) {
   float inv_rms = rsqrtf(sq_sum / static_cast<float>(d) + 1e-5f);
 
   // --- Step 3: GEMV with inline RMS normalization ---
+  if (!row_valid) return;  // safe: no barriers below this point
   const __half* weight_row = args.W + row * d_in;
   // Warp-strided loop: 32 lanes × 8 elements = 256 elements per iteration.
   const int stride = 8 * 32;

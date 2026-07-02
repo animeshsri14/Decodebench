@@ -23,15 +23,16 @@ def _f1_traces(d: int, b: int = 1) -> list[StageTrace]:
     ]
 
 def _f2_traces(d: int, b: int = 1) -> list[StageTrace]:
-    """gate/up GEMV + SwiGLU.
+    """Gate GEMV -> up GEMV -> SwiGLU.
 
-    §11.1 table total (180,768,768) disagrees with per-op formulas (180,437,504)
-    by 331,264 bytes — formulas are authoritative, don't pad to match the table.
+    Both GEMV outputs are materialized by the unfused pipeline and are read by
+    SwiGLU, so both write/read pairs are eliminable.
     """
     ff = _FFN[d]
     return [
         StageTrace("gate", reads=[2 * b * d, 2 * ff * d], write=2 * b * ff, is_final=False),
-        StageTrace("up_and_swiglu", reads=[2 * b * ff, 2 * ff * d, 2 * b * d], write=2 * b * ff, is_final=True)
+        StageTrace("up", reads=[2 * b * d, 2 * ff * d], write=2 * b * ff, is_final=False),
+        StageTrace("swiglu", reads=[2 * b * ff, 2 * b * ff], write=2 * b * ff, is_final=True),
     ]
 
 def _f4_traces(d: int, b: int = 1, l: int = 1024, head_dim: int = 128) -> list[StageTrace]:

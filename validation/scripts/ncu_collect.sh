@@ -5,6 +5,9 @@
 #         ncu_metrics.csv via analysis/parse_ncu.py.
 set -euo pipefail
 
+# compare.py models the default one-tile-per-split F4 configuration.
+unset DECODEBENCH_F4_SPLITS
+
 if [ -d "/usr/lib/wsl/lib" ]; then
   export LD_LIBRARY_PATH="/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}"
 fi
@@ -33,9 +36,12 @@ run_ncu() {
 
   echo "--- NCU: $fusion / $variant ---"
 
+  # Fail-closed: an NCU failure or empty output aborts collection. A missing
+  # counter file must not silently flow downstream as "N/A".
   ncu \
     --metrics "$NCU_METRICS" \
     --clock-control none \
+    --force-overwrite \
     --csv \
     --log-file "$raw_csv" \
     "$BENCH_BIN" \
@@ -47,11 +53,11 @@ run_ncu() {
       --target-ms 1 \
       --ncu-mode \
       --skip-correctness \
-      --csv /dev/null \
-    2>&1 || echo "WARN: ncu failed for $fusion/$variant"
+      --csv /dev/null
 
   if [ ! -s "$raw_csv" ]; then
-    echo "WARN: no NCU output for $fusion/$variant ($raw_csv missing or empty)"
+    echo "ERROR: no NCU output for $fusion/$variant ($raw_csv missing or empty)" >&2
+    exit 1
   fi
 }
 

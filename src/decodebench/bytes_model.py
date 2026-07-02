@@ -32,12 +32,26 @@ class StageTrace:
     is_final : bool
         If ``True`` this write is the final output consumed downstream and
         is *not* eligible for elimination in the fused kernel.
+    consumers : int
+        Number of downstream stage arguments that read this output.  A fully
+        fused region eliminates the producer write plus one materialized read
+        per consumer.  The default of one preserves the linear-chain/manual
+        ``StageTrace`` contract.
     """
 
     name: str
     reads: list[int]
     write: int
     is_final: bool = False
+    consumers: int = 1
+
+    def __post_init__(self) -> None:
+        if self.write < 0 or any(r < 0 for r in self.reads):
+            raise ValueError("StageTrace byte counts must be non-negative")
+        if self.consumers < 0:
+            raise ValueError("StageTrace consumers must be non-negative")
+        if not self.is_final and self.consumers == 0:
+            raise ValueError("non-final StageTrace must have at least one consumer")
 
 
 def total_bytes(traces: list[StageTrace]) -> int:
@@ -48,7 +62,9 @@ def total_bytes(traces: list[StageTrace]) -> int:
 def eliminable_bytes(traces: list[StageTrace]) -> int:
     """Bytes that can be eliminated by fusion.
 
-    This is **2 ×** the write volume of every non-final stage, modelling
-    that both the write and the downstream read are saved.
+    For each non-final stage this is its write plus one same-sized read per
+    declared consumer.  A linear chain therefore retains the familiar
+    ``2 * write`` result, while fan-out is accounted rather than silently
+    under-counted.
     """
-    return 2 * sum(t.write for t in traces if not t.is_final)
+    return sum((1 + t.consumers) * t.write for t in traces if not t.is_final)

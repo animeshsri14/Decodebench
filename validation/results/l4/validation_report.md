@@ -1,4 +1,9 @@
 # DecodeBench Validation Report
+
+> **RETRACTED VALIDATION STATUS:** This historical report predates the current
+> F2 accounting, cache-residency parity, split-KV F4 implementation, and
+> fail-closed gates. Its raw measurements are retained, but its PASS summary is
+> not valid evidence under the current pipeline. A fresh hardware run is required.
 Generated: 2026-07-01T00:15:33.183667
 
 ## Check (G1): Numerical correctness (fused/unfused vs CPU reference)

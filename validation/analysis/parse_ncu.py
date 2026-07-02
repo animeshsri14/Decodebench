@@ -31,16 +31,20 @@ def find_round_size(kernel_sequence):
     """
     names = [kname for _, kname in kernel_sequence]
     n = len(names)
+    # The candidate period must fit the ENTIRE sequence. Profiler-injected
+    # kernels, renamed templates, or truncated captures break periodicity;
+    # that raises instead of silently grouping counters into wrong rounds.
     for period in range(1, n // 2 + 1):
         pattern = names[:period]
-        # Verify pattern repeats for at least 2 full cycles
-        fits = all(
-            names[i] == pattern[i % period]
-            for i in range(min(n, period * 4))
-        )
-        if fits:
+        if all(names[i] == pattern[i % period] for i in range(n)):
             return period
-    return 1  # fallback
+    if len(set(names)) == 1:
+        return 1
+    raise ValueError(
+        "NCU kernel sequence is not periodic; cannot group rounds reliably. "
+        f"Distinct kernels seen: {sorted(set(names))}. First 12: {names[:12]}. "
+        "Check for profiler-injected or unexpected kernels in the capture."
+    )
 
 
 def parse_ncu_file(path):
@@ -125,7 +129,10 @@ def main():
             read_bytes, write_bytes = parse_ncu_file(path)
 
             if read_bytes is None:
-                print(f"  WARNING: no data for {fusion}/{variant} ({fname})")
+                # Emit a zero row: compare.py's completeness gate (G0) treats
+                # zero-byte cells as missing data and FAILs the run.
+                print(f"  WARNING: no data for {fusion}/{variant} ({fname}); "
+                      "compare.py will FAIL this cell")
                 read_bytes, write_bytes = 0.0, 0.0
             else:
                 total_mb = (read_bytes + write_bytes) / 1e6

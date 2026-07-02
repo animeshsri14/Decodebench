@@ -7,10 +7,10 @@ Reproducible CUDA validation kernels and harness for DecodeBench
 
 | Check    | Claim | Validation Method |
 |----------|------------|-------------------|
-| G1       | Kernel correctness | unfused vs CPU reference, max_abs < 5e-2, max_rel < 2e-2 |
+| G1       | Kernel correctness | Every output passes `abs_error < 5e-2 OR rel_error < 2e-2`; F1/F2/F4 use independent CPU references |
 | G2       | GEMV kernel >= 90% cuBLAS bandwidth | `calibrate --gate-g2` compares unfused FP16 GEMV to cublasGemmEx |
-| (a)      | t_graph ≈ t_fused + B (residual ≤ 0; residual > 0 on a correctness-gated config = WARN "exceeds model", a favorable bound violation) | `compare.py` computes residual_us = t_graph - t_fused - B |
-| (b)      | F1/F2: analytic byte model matches NCU DRAM totals within 20%. F4: measured eliminated delta (unfused − fused) ≥ analytic eliminable bytes (totals ratio reported as diagnostic) | `compare.py` joins timing CSV + ncu metrics CSV |
+| (a)      | t_graph ≈ t_fused + B within ±2% of t_graph | `compare.py` checks `abs(t_graph - t_fused - B)` |
+| (b)      | F1/F2 totals within 20%; F4 eliminated delta within a two-sided tolerance of the modeled delta | `compare.py` joins timing CSV + NCU metrics |
 | (c)      | Launch overhead captured by graphs (Δ_launch > 0) | `compare.py` checks t_stream - t_graph vs 0 |
 
 ## Directory Structure
@@ -121,10 +121,12 @@ python3 validation/analysis/compare.py \
 ### 5. Interpreting Results
 
 - **G2 PASS**: GEMV kernel achieves ≥90% of cuBLAS bandwidth → kernels are efficient
-- **Check (a) PASS**: t_graph - t_fused - B ≤ 0 → byte-elimination fully explains the fused speedup. **WARN (exceeds model)**: fused wins by more than Δ_launch + B on a correctness-gated config — a favorable bound violation whose known cause is inter-kernel serialization elimination (see README limitations). *Gate revision 2026-07-02: was FAIL.*
-- **Check (b) PASS**: F1/F2 — analytic byte model matches NCU DRAM totals within 20%. F4 — measured eliminated delta ≥ analytic eliminable bytes (per-GPU counter excess on KV streams cancels in the delta; absolute ratios stay as diagnostics). *Gate revision 2026-07-02: replaces the one-off f4/unfused WARN carve-out.*
+- **Check (a) PASS**: `abs(t_graph - t_fused - B) ≤ 2% * t_graph`. Large residuals in either direction fail because the model does not explain the measured graph-to-fused difference.
+- **Check (G0) PASS**: every expected (fusion, dim, variant) timing cell and NCU cell is present with usable data. Missing data is a FAIL — the pipeline is fail-closed.
+- **Check (b) PASS**: F1/F2 — analytic byte model matches NCU DRAM totals within 20%. F4 — measured eliminated delta lies within a two-sided tolerance of the analytic delta (eliminable bytes minus modeled split-KV partial traffic). A delta far above the model FAILs just like one below it.
 - **Check (c) PASS**: Launch overhead estimates are consistent → timing methodology is sound
-- **Validation PASS**: All checks pass → all claims are validated
+- **Check (H) PASS**: the pre-registered hypotheses (H1/H2 ≥80% attribution, H4(c) 2% decomposition consistency) hold as gates; a refuted hypothesis is a FAIL, not a warning.
+- **Validation PASS**: every registered check passes. Any FAIL yields `FAIL`; any WARN without a FAIL yields `INCOMPLETE` and a nonzero exit status.
 
 ## Dimensions
 
@@ -136,7 +138,7 @@ python3 validation/analysis/compare.py \
 | H | 32 | Number of attention heads (fixed) |
 | L | 2048, 4096 | F4: KV-cache length (`--dim`; multiple of 128) |
 | D | 128 | Head dimension (fixed) |
-| B | 1–8 | Batch CSV label only (reserved; no kernel is batched yet) |
+| B | 1 | Batch. Only 1 is accepted: no kernel is batched, and bench_variant rejects `--batch != 1` so unbatched runs can never be labeled as batch sweeps. |
 
 `--dim` semantics per fusion: for F1/F2 it is the hidden dimension; for F4 it
 is the KV-cache length L, so F4 sweeps vary the real problem size.
@@ -152,7 +154,14 @@ The benchmarked "fused" F4 is a split-KV FlashDecode: `f4_partial_kernel`
 K/V read with the same coalesced idioms as the tuned unfused kernels)
 followed by `f4_reduce_kernel` (log-sum-exp merge). It is **2 launches**,
 vs 3 in the unfused chain; scores/probs never touch global memory.
-`DECODEBENCH_F4_SPLITS=<n>` overrides the split count for per-GPU tuning
-experiments. The historical single-block `f4_kernel` is kept as a
-correctness reference (second witness in the G1 gate) but is not
-throughput-competitive.
+`DECODEBENCH_F4_SPLITS=<n>` may be used for standalone tuning experiments, but
+the official validation scripts unset it because the analytic delta models the
+default split count. The historical single-block `f4_kernel` remains a second
+GPU witness; an independent scalar CPU attention implementation is the G1
+correctness authority.
+
+The split-KV fused path is not a fusion-only controlled transformation: it
+also changes parallel decomposition, reduction scheduling, occupancy, and
+cache behavior. F4 timing and NCU deltas therefore validate this concrete
+implementation, not a causal claim that every difference comes solely from
+eliminating scores/probabilities. Unexplained residuals fail validation.

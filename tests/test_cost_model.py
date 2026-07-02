@@ -13,9 +13,9 @@ def test_cost_model_4096():
 
     # Verify F2
     f2 = next(c for c in costs if c.name == "F2")
-    assert f2.total == 180437504
-    assert f2.eliminable == 44032
-    assert round(f2.ratio, 6) == 0.000244
+    assert f2.total == 180481536
+    assert f2.eliminable == 88064
+    assert round(f2.ratio, 6) == 0.000488
     assert f2.predicted == "launch-bound"
 
     # Verify F4
@@ -37,9 +37,9 @@ def test_cost_model_2048():
 
     # Verify F2
     f2 = next(c for c in costs if c.name == "F2")
-    assert f2.total == 67166208
-    assert f2.eliminable == 32768
-    assert round(f2.ratio, 6) == 0.000488
+    assert f2.total == 67198976
+    assert f2.eliminable == 65536
+    assert round(f2.ratio, 6) == 0.000975
     assert f2.predicted == "launch-bound"
 
     # Verify F4

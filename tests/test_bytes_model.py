@@ -18,3 +18,21 @@ def test_single_final_stage():
     ]
     assert total_bytes(traces) == 33570816
     assert eliminable_bytes(traces) == 0
+
+def test_fanout_counts_one_read_per_consumer():
+    traces = [
+        StageTrace("producer", reads=[64], write=128, consumers=2),
+        StageTrace("final", reads=[128, 128], write=32, is_final=True, consumers=0),
+    ]
+    assert total_bytes(traces) == 480
+    assert eliminable_bytes(traces) == 384  # write + two downstream reads
+
+def test_invalid_trace_metadata():
+    import pytest
+
+    with pytest.raises(ValueError, match="non-negative"):
+        StageTrace("bad", reads=[-1], write=1)
+    with pytest.raises(ValueError, match="consumers"):
+        StageTrace("bad", reads=[], write=1, consumers=-1)
+    with pytest.raises(ValueError, match="at least one consumer"):
+        StageTrace("dead", reads=[], write=1, consumers=0)
