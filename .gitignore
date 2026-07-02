@@ -37,3 +37,15 @@ tests/fixtures/
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
+
+# Validation scratch: NCU tmp files and raw run logs are not v1 artifacts
+# (tracked artifacts per GPU: ncu_raw_*.csv, timing.csv, ncu_metrics.csv,
+#  validation_report.md)
+validation/results/**/ncu_tmp_*.csv
+validation/results/**/validate_*.log
+
+# Working outputs of validate.sh land in validation/results/ directly;
+# promote them to validation/results/<gpu>/ before committing
+validation/results/*.csv
+validation/results/*.md
+validation/results/*.log
