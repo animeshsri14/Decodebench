@@ -1,14 +1,13 @@
 # DecodeBench Validation Report
+Generated: 2026-07-02T18:12:56.222296
 
-> **RETRACTED VALIDATION STATUS:** This historical report was produced with
-> superseded one-sided/WARN-counts-as-PASS gates and variant-dependent cache
-> residency. Its raw measurements are retained, but its PASS summary is not
-> valid evidence under the current pipeline. A fresh hardware run is required.
-Generated: 2026-07-02T11:28:37.331378
+## Check (G0): Data completeness
+
+Every expected (fusion, dim, batch, variant) config must be present with usable timing samples, and every expected NCU cell must have data. A missing cell is a FAIL: an empty or partial collection must not be able to produce an overall PASS.
+
+- (unlisted cells present and usable)
 
 ## Check (G1): Numerical correctness (fused/unfused vs CPU reference)
-
-Every measured config must report correctness_ok=1 from bench_variant, which checks each variant against an inline CPU reference (numpy-allclose tolerance: a mismatch must exceed both abs 5e-2 and rel 2e-2). A FAIL here voids the timing.
 
 | Fusion | Dim | Variant | correctness_ok | Status |
 |--------|-----|---------|----------------|--------|
@@ -33,46 +32,84 @@ Every measured config must report correctness_ok=1 from bench_variant, which che
 
 ## Check (a): Residual analysis (t_graph - t_fused - B)
 
-PASS means the fused speedup over the graph baseline is fully explained by the byte-elimination bound B. WARN (exceeds model) means the fused kernel wins by MORE than Δ_launch + B — a favorable-direction bound violation on a correctness-gated config (G1 guards against a fused kernel that skips work). Known unmodeled terms (see README Limitations): elimination of inter-kernel serialization — low-parallelism interleaved stages (e.g. the H-block softmax) and per-boundary drain/ramp that graph replay cannot remove. [Gate revision 2026-07-02: residual > 0 was originally FAIL; reclassified to WARN after the tuned split-KV F4 kernel demonstrated a real, attributed win beyond the modeled terms. The decomposition claim's outcome per GPU is reported in the README validation-status notes.]
+PASS means the fused speedup over the graph baseline is explained by the byte estimate B within +2% of t_graph. A larger residual — in either the unfavorable OR the favorable direction — is a FAIL: a fused win far beyond Δ_launch + B means the decomposition does not describe this workload, whatever the sign of the surprise. [2026-07 revision: the earlier favorable-direction WARN reclassification is reverted.]
 
-| Fusion | Dim | t_unfused_graph (us) | t_fused (us) | B (us) | Residual | Status |
-|--------|-----|---------------------|-------------|--------|----------|--------|
-| f1 | 2048 | 220.58 | 256.19 | 0.03 | -35.64 | PASS |
-| f1 | 4096 | 437.79 | 562.84 | 0.06 | -125.11 | PASS |
-| f2 | 2048 | 428.04 | 441.79 | 0.21 | -13.96 | PASS |
-| f2 | 4096 | 847.68 | 880.65 | 0.21 | -33.17 | PASS |
-| f4 | 2048 | 212.94 | 179.55 | 6.45 | 26.93 | WARN (exceeds model: fused win > Δ_launch+B, see note) |
-| f4 | 4096 | 437.94 | 370.02 | 13.27 | 54.66 | WARN (exceeds model: fused win > Δ_launch+B, see note) |
+| Fusion | Dim | t_graph (us) | t_fused (us) | B (us) | Residual | Status |
+|--------|-----|-------------|-------------|--------|----------|--------|
+| f1 | 2048 | 219.62 | 253.43 | 0.03 | -33.84 | FAIL |
+| f1 | 4096 | 435.23 | 537.09 | 0.06 | -101.93 | FAIL |
+| f2 | 2048 | 425.73 | 439.99 | 0.42 | -14.68 | FAIL |
+| f2 | 4096 | 844.47 | 878.39 | 0.41 | -34.33 | FAIL |
+| f4 | 2048 | 187.56 | 166.30 | 5.68 | 15.58 | FAIL |
+| f4 | 4096 | 384.16 | 317.53 | 11.64 | 54.99 | FAIL |
 
-## Check (b): Analytic bytes vs NCU DRAM bytes (tolerance ±20%)
+## Check (b): Analytic bytes vs NCU DRAM bytes
 
-Analytic is a lower bound: does not model cache-line granularity overhead or L2 thrashing caused by weight matrices exceeding L2 capacity. Measured ~10-15% excess over analytic for weight-streaming kernels on L4 (96 MB L2 vs 117+ MB weights).
-
-F1/F2 gate on absolute totals (the byte model's claim for weight streams). F4 gates on the ELIMINATED DELTA — measured (unfused − fused) DRAM bytes ≥ analytic eliminable bytes — because the byte-elimination hypothesis is about the delta, and uniform per-GPU counter excess on KV streams (e.g. ~1.3-1.4× on T4, affecting both variants equally) cancels in the delta but not in the totals. Absolute F4 ratios remain reported as diagnostics. [Gate revision 2026-07-02, replacing the earlier one-off WARN carve-out for f4/unfused-stream.]
+F1/F2 gate on absolute totals (tolerance ±20%; analytic is a lower bound; cache-line granularity and L2 thrashing add measured ~10-15% on weight streams). F4 gates on the eliminated DELTA, two-sided: measured (unfused − fused) DRAM bytes must lie within ±50% of the analytic delta (eliminable bytes minus the modeled split-KV partial-buffer traffic the fused variant adds). A delta far ABOVE the model is as much a model failure as one below it — an unbounded one-sided gate would pass on any unrelated traffic difference.
 
 | Fusion | Variant | Analytic (MB) | NCU DRAM (MB) | Ratio | Status |
 |--------|---------|---------------|---------------|-------|--------|
-| f1 | unfused-stream | 117.50 | 132.10 | 0.89 | PASS |
-| f1 | fused | 117.50 | 139.05 | 0.85 | PASS |
-| f2 | unfused-stream | 234.98 | 264.32 | 0.89 | PASS |
-| f2 | fused | 234.98 | 275.93 | 0.85 | PASS |
-| f4 | unfused-stream | 69.22 | 97.59 | 0.71 | PASS (delta gate: eliminated 6.81 MB ≥ analytic eliminable 2.10 MB; totals ratio diagnostic, see note) |
-| f4 | fused | 69.22 | 90.78 | 0.76 | PASS (delta gate: eliminated 6.81 MB ≥ analytic eliminable 2.10 MB; totals ratio diagnostic, see note) |
+| f1 | unfused-stream | 117.50 | 132.05 | 0.89 | PASS |
+| f1 | fused | 117.50 | 138.96 | 0.85 | PASS |
+| f2 | unfused-stream | 235.04 | 264.18 | 0.89 | PASS |
+| f2 | fused | 235.04 | 275.98 | 0.85 | PASS |
+| f4 | delta (unfused−fused) | 1.03 | 6.52 | 6.32 | FAIL |
+| f4 | unfused-stream (diagnostic) | 69.22 | 97.05 | 0.71 | — |
+| f4 | fused (diagnostic) | 69.22 | 90.52 | 0.76 | — |
 
-## Check (c): CUDA Graphs capture launch overhead (Δ_launch > 0)
+## Check (c): CUDA Graphs capture launch overhead (Δ_launch ≥ 0)
 
-Δ_launch = t_stream - t_graph must be positive: graphs are at least as fast as stream, confirming launch overhead exists and is captured by graph replay.
+| Fusion | Dim | t_stream (us) | t_graph (us) | Δ_launch (us) | Status |
+|--------|-----|--------------|-------------|--------------|--------|
+| f1 | 2048 | 220.82 | 219.62 | 1.20 | PASS |
+| f1 | 4096 | 436.06 | 435.23 | 0.83 | PASS |
+| f2 | 2048 | 427.93 | 425.73 | 2.20 | PASS |
+| f2 | 4096 | 846.48 | 844.47 | 2.01 | PASS |
+| f4 | 2048 | 187.58 | 187.56 | 0.02 | PASS |
+| f4 | 4096 | 383.97 | 384.16 | -0.19 | FAIL |
 
-| Fusion | t_stream (us) | t_graph (us) | Δ_launch (us) | t_fused (us) | Status |
-|--------|--------------|-------------|--------------|-------------|--------|
-| f1 | 438.34 | 437.79 | 0.55 | 562.84 | PASS |
-| f2 | 851.79 | 847.68 | 4.11 | 880.65 | PASS |
-| f4 | 446.06 | 437.94 | 8.12 | 370.02 | PASS |
+## Check (H): Pre-registered hypotheses (README)
+
+H1: F1/F2 launch-bound — Δ_launch explains ≥80% of the unfused-to-fused gap (t_stream − t_fused). H2: F4 byte-bound — B explains ≥80% of that gap. H4(c): |(t_stream − t_fused) − (Δ_launch + B)| ≤ 2% of t_graph. These are gates, not notes: a refuted hypothesis is a FAIL in this report (and belongs in the paper as a negative result). When the fused kernel provides no gain over the stream baseline (gap ≤ 0) the attribution fraction is undefined; that is reported as WARN with the gap shown, since the pre-registered claim is about a positive gap.
+
+| Hypothesis | Fusion | Dim | Gap (us) | Term (us) | Fraction | Status |
+|-----------|--------|-----|----------|-----------|----------|--------|
+| H1 | f1 | 2048 | -32.61 | 1.20 | — | WARN |
+| H4(c) | f1 | 2048 | -32.61 | 1.23 | — | FAIL |
+| H1 | f1 | 4096 | -101.03 | 0.83 | — | WARN |
+| H4(c) | f1 | 4096 | -101.03 | 0.90 | — | FAIL |
+| H1 | f2 | 2048 | -12.06 | 2.20 | — | WARN |
+| H4(c) | f2 | 2048 | -12.06 | 2.62 | — | FAIL |
+| H1 | f2 | 4096 | -31.91 | 2.01 | — | WARN |
+| H4(c) | f2 | 4096 | -31.91 | 2.43 | — | FAIL |
+| H2 | f4 | 2048 | 21.28 | 5.68 | 0.27 | FAIL |
+| H4(c) | f4 | 2048 | 21.28 | 5.70 | — | FAIL |
+| H2 | f4 | 4096 | 66.44 | 11.64 | 0.18 | FAIL |
+| H4(c) | f4 | 4096 | 66.44 | 11.45 | — | FAIL |
 
 ---
 
 ## Summary
 
-- PASS: 33
-- FAIL: 0
-- **Overall: PASS**
+- PASS: 51
+- WARN: 4 (warnings never count as passes)
+- FAIL: 16
+- **Overall: FAIL**
+
+### Failing checks
+- [a] f1/2048: residual=-33.84us
+- [a] f1/4096: residual=-101.93us
+- [a] f2/2048: residual=-14.68us
+- [a] f2/4096: residual=-34.33us
+- [a] f4/2048: residual=15.58us
+- [a] f4/4096: residual=54.99us
+- [b] f4/delta: measured delta 6.52 MB vs analytic 1.03 MB (accept [0.52, 1.55])
+- [c] f4/4096: delta=-0.19us
+- [H] H4c/f1/2048: |gap-(Δ+B)|=33.84us vs 2%·t_graph=4.39us
+- [H] H4c/f1/4096: |gap-(Δ+B)|=101.93us vs 2%·t_graph=8.70us
+- [H] H4c/f2/2048: |gap-(Δ+B)|=14.68us vs 2%·t_graph=8.51us
+- [H] H4c/f2/4096: |gap-(Δ+B)|=34.33us vs 2%·t_graph=16.89us
+- [H] H2/f4/2048: fraction=0.27
+- [H] H4c/f4/2048: |gap-(Δ+B)|=15.58us vs 2%·t_graph=3.75us
+- [H] H2/f4/4096: fraction=0.18
+- [H] H4c/f4/4096: |gap-(Δ+B)|=54.99us vs 2%·t_graph=7.68us
