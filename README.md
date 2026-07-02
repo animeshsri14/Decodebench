@@ -112,28 +112,29 @@ These hypotheses were registered before any measurement runs:
 - **H3:** Δ_launch (in microseconds) grows relative to t_graph as GPU bandwidth rises, since byte-elimination savings shrink with faster memory while launch overhead remains roughly constant across generations.
 - **H4:** Three independent correctness checks pass within stated tolerances:
   - **(a)** Numerical correctness: fused and unfused outputs match within 1×10⁻³ relative error (L∞ norm).
-  - **(b)** Monotonicity: t_fused ≤ t_graph for all measured configurations. *Note: this does not hold for F4 - the shipped f4.cu is a correctness reference, not a throughput-tuned kernel; see validation status below.*
+  - **(b)** Monotonicity: t_fused ≤ t_graph for all measured configurations. *Note: as of 2026-07-02 this holds on T4 for all three fusions, including F4, using the throughput-tuned split-KV FlashDecode kernel; the earlier single-block f4.cu (kept as a correctness reference) did not satisfy it. L4 results predate the tuned kernel.*
   - **(c)** Decomposition consistency: |(t_graph − t_fused) − (Δ_launch + B)| ≤ 2% of t_graph.
 
 ---
 
-## Validation status (as of 2026-07-01)
+## Validation status (as of 2026-07-02)
 
-Two of the four GPUs are measured; **A100 and RTX Pro 6000 runs will follow**, along with a throughput-tuned F4 kernel (see the F4 caveat below).
+Two of the four GPUs are measured; **A100 and RTX Pro 6000 runs will follow**.
 
 | GPU | Status | Notes |
 |-----|--------|-------|
-| L4 (SM89, Ada) | COMPLETE - 33/33 PASS | F1/F2 launch-bound; F4 byte-bound signal |
-| T4 (SM75, Turing) | 32/33 | Sole failure: f4/fused Check (b), analytic-vs-NCU ratio 0.72 (outside ±20%) - T4's ~4 MB L2 thrashes the single-block FlashDecode reference. Hardware effect, not a bug; see caveat. |
+| L4 (SM89, Ada) | COMPLETE - 33/33 PASS | F1/F2 launch-bound; F4 byte-bound signal. **Predates the tuned split-KV F4 kernel and F4 `--dim`=KV-length semantics — its F4 rows are not comparable to newer runs.** |
+| T4 (SM75, Turing) | 30/33 | Re-run 2026-07-02 with the throughput-tuned split-KV F4 kernel and tuned unfused attention baseline. G1 18/18, Check (c) 3/3. The 3 FAILs are all F4 and all in the *favorable* direction — see outcome notes. |
 | A100 (SM80, Ampere) | pending | - |
 | RTX Pro 6000 (SM120, Blackwell) | pending | - |
 
-**Outcome notes and caveats:**
+**Outcome notes and caveats (T4, 2026-07-02 run):**
 
-- **H1 (F1/F2 launch-bound):** holds on L4 and T4.
-- **H2 (F4 byte-bound):** the *analytic* byte ceiling B and the NCU byte ratio support the byte-bound classification, but there is **no wall-clock fusion-beats-graph demonstration** yet. The shipped `f4.cu` is a single-block online-softmax **correctness reference**, not a throughput-tuned FlashAttention, so fused F4 runs **~1.3–1.9× *slower*** than the CUDA-graph baseline. A throughput-tuned F4 kernel is planned for the follow-up runs.
-- **H4(b) (monotonicity `t_fused ≤ t_graph`): does *not* hold for F4** for the reason above; it holds for F1/F2. The implemented harness gate is Check (a) - the residual `(t_graph − t_fused) − B ≤ 0` - which F4 satisfies, but note this passes **vacuously** for F4 (it is satisfied *because* fused is slower, and is not a wall-clock win).
-- **F4's byte-elimination ceiling is small by construction:** for single-query decode the eliminable intermediate (scores+probs, `O(L)`) versus KV traffic (`O(L·D)`) fixes the eliminable fraction at **4/D ≈ 3% of runtime, independent of sequence length**. Increasing KV/context length does **not** create a crossover - even a fully tuned kernel wins at most ~3% at long context, likely within measurement noise.
+- **H1 (F1/F2 launch-bound):** holds on L4 and T4. Fused F1/F2 remain slower than the graph baseline (fusion is not worth it beyond launch elimination), Δ_launch > 0.
+- **H4(b) monotonicity now holds for F4, non-vacuously:** the split-KV FlashDecode fused kernel beats the CUDA-graph baseline wall-clock at both KV lengths (L=2048: 180 vs 213 µs; L=4096: 370 vs 438 µs, ~16% faster). Both the fused kernel *and* the unfused attention baseline (`attn_scores`, `attn_v`) were tuned to the same coalesced-streaming idioms, so the comparison isolates fusion effects rather than kernel tuning quality.
+- **H2 (F4 byte-bound) is only partially supported on T4 — Check (a) FAILs in the favorable direction.** The fused win *exceeds* the modeled bound Δ_launch + B (gap 68 µs vs modeled ~21 µs at L=4096). B accounts for ~20% of the gap, not the pre-registered ≥80%. The dominant unmodeled term is **elimination of inter-kernel serialization**: the low-parallelism softmax stage (H=32 blocks) and per-boundary drain/ramp that graph replay cannot remove. This is exactly Limitation "B only bounds byte-elimination" — now a *measured* effect, not just a caveat. Among the *modeled* terms, B (13.3 µs) still dominates Δ_launch (8.1 µs), so the byte-vs-launch classification stands; the total-gain decomposition does not.
+- **Check (b) f4/fused FAIL (ratio 0.76):** T4's DRAM counters report ~1.3–1.4× the analytic lower bound on all KV-streaming kernels (both variants: unfused 0.71, fused 0.76) — a T4 memory-subsystem/counter effect, consistent with the previous run's documented caveat. The *measured eliminated delta* (97.6 − 90.8 = 6.8 MB) exceeds the analytic eliminable bytes, which strengthens rather than weakens the byte-elimination claim.
+- **F4's byte-elimination ceiling is small by construction:** for single-query decode the eliminable intermediate (scores+probs, `O(L)`) versus KV traffic (`O(L·D)`) fixes the eliminable fraction at **4/D ≈ 3% of runtime, independent of sequence length**. Increasing KV/context length does **not** create a crossover via bytes alone. The measured F4 wall-clock win (~16%) is real but comes mostly from serialization elimination, not bytes — do not cite it as a byte-elimination result.
 
 ---
 
