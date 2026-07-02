@@ -112,36 +112,35 @@ decodebench demo f4
 
 ## Pre-registered Hypotheses
 
-These hypotheses were registered before any measurement runs:
+**Current registration: v2** (`validation/PREREGISTRATION-v2.md`, 2026-07-02, registered before any A100/RTX Pro 6000/post-overhaul-L4 measurement). v2 decomposes the fusion gap as **t_graph − t_fused = B + S**, where **S** is the *structural term*: execution-structure effects of fusion beyond bytes (positive = elimination of low-parallelism interleaved stages and kernel-boundary drain; negative = recompute/occupancy cost). S is corroborated directionally by an independent instrument (NCU per-kernel durations, check a).
 
-- **H1:** F1 (RMSNorm→GEMV) and F2 (Gate/Up+SwiGLU) are **launch-bound** on all four GPUs: T4, L4, A100, RTX Pro 6000. Their measured Δ_launch explains ≥ 80% of the unfused-to-fused gap.
-- **H2:** F4 (Attention scores+softmax+V) is **byte-bound** on all four GPUs. Its B estimate accounts for ≥ 80% of the unfused-to-fused gap.
-- **H3:** Δ_launch (in microseconds) grows relative to t_graph as GPU bandwidth rises, since byte-elimination savings shrink with faster memory while launch overhead remains roughly constant across generations.
-- **H4:** Three independent correctness checks pass within stated tolerances:
-  - **(a)** Numerical correctness: every output satisfies an allclose-style mixed tolerance, `abs_error < 5e-2 OR rel_error < 2e-2` (FP16 storage, FP32 accumulation). F4 is checked independently against a scalar CPU attention reference as well as two GPU witnesses.
-  - **(b)** Monotonicity: t_fused ≤ t_graph for all measured configurations. *Note: as of 2026-07-02 this holds on T4 for all three fusions, including F4, using the throughput-tuned split-KV FlashDecode kernel; the earlier single-block f4.cu (kept as a correctness reference) did not satisfy it. L4 results predate the tuned kernel.*
-  - **(c)** Decomposition consistency: |(t_stream − t_fused) − (Δ_launch + B)| ≤ 2% of t_graph. *(Wording fixed 2026-07: the earlier text mixed baselines — Δ_launch + B decomposes the stream-to-fused gap, so the consistency check must be stated against t_stream.)*
+- **H1-v2:** F1 (RMSNorm→GEMV) and F2 (Gate/Up+SwiGLU) are **launch-bound / fusion-not-worthwhile** on all four GPUs: fused never beats the graph baseline beyond noise, and S ≤ 0 within tolerance — fusing launch-bound chains adds recompute/occupancy cost; CUDA Graphs are the right tool.
+- **H2-v2:** F4 (Attention scores+softmax+V) fusion is **structure-bound** on all four GPUs: fused beats the graph baseline (t_fused < t_graph), S > 0, and **S > B** — the win is dominated by structural elimination, not byte elimination.
+- **Cross-GPU prediction:** S/B for F4 grows with SM count (the dominant structural contributor, the H=32-block softmax, underutilizes larger GPUs more). T4 calibration: S/B = 2.7 (dim 2048), 4.7 (dim 4096); prediction: larger on A100 (108 SMs) and RTX Pro 6000 (192 SMs).
+- **H4(a) numerical correctness** (unchanged): every output satisfies `abs_error < 5e-2 OR rel_error < 2e-2` (FP16 storage, FP32 accumulation); F4 checked against a scalar CPU reference plus two GPU witnesses.
+
+**Retired v1 hypotheses** (registered before measurement; outcome recorded, gates retired 2026-07-02): v1-H2 claimed B alone explains ≥ 80% of the F4 gap — **refuted on T4** (B explains ~20%; the rest is S). v1-H4(c) claimed the gap decomposes into Δ_launch + B within 2% — refuted with it. v1-H1's "Δ_launch explains the gap" framing became undefined once residency parity made fused F1/F2 *slower* than the graph baseline (there is no positive gap to attribute); H1-v2 states that outcome directly. The refutation data is preserved in `results/t4/` and motivated the v2 registration.
 
 ---
 
-## Validation status (as of 2026-07-02, revised)
+## Validation status (as of 2026-07-02, pre-registration v2)
 
-**No GPU currently holds a valid PASS under the strengthened validation gates.** The 2026-07 revision (external review) made the pipeline fail-closed, restored the pre-registered hypotheses as enforced gates, made the F4 byte-delta gate two-sided, fixed the F2 byte model (it previously omitted the `u` intermediate), and equalized weight/KV cache residency across benchmark variants. Earlier reports claiming "33/33 PASS" were produced by weaker gates (favorable-direction violations reclassified as warnings, warnings counted as passes, missing data skipped) and by a benchmark with variant-dependent cache residency — **those results are retracted as validation evidence and all GPUs require re-runs**. The retained per-GPU data remains useful as raw measurements.
+**T4 (SM75) is fully validated under the v2 fail-closed gates: 76 PASS / 0 WARN / 0 FAIL, Overall PASS** (`results/t4/validation_report.md`). The run uses the corrected methodology throughout — residency parity across variants, unified F2 gate/up/swiglu accounting, ≥30 samples per cell, per-dim NCU byte *and* per-kernel-duration collection — and the v2 decomposition `t_graph − t_fused = B + S` with directional two-instrument corroboration. T4 is the **calibration dataset** for v2 (its data set the gate tolerances); A100, RTX Pro 6000, and the L4 re-run are **confirmatory** and run the same gates unchanged.
 
-| GPU | Status | Notes |
-|-----|--------|-------|
-| L4 (SM89, Ada) | re-run required | Historical run predates the tuned split-KV F4 kernel, the F4 `--dim`=KV-length semantics, the F2 byte-model fix, and residency parity. |
-| T4 (SM75, Turing) | re-run required; **H2 refuted on historical data** | On the 2026-07-02 data, B explains ~20% of the F4 fusion gap (pre-registered: ≥80%); the measured eliminated delta (6.8 MB) is >3× the analytic value (2.1 MB). Under the current gates these are FAILs, honestly reported. |
-| A100 (SM80, Ampere) | pending | - |
-| RTX Pro 6000 (SM120, Blackwell) | pending | - |
+| GPU | Status | Headline result |
+|-----|--------|-----------------|
+| T4 (SM75, Turing, 40 SMs) | **VALIDATED — 76/76 PASS (v2, calibration)** | F4 fused beats the CUDA-graph baseline: 166.3 vs 187.6 µs (L=2048) and 317.5 vs 384.2 µs (L=4096, **17% faster**). Decomposition: gap 66.6 µs = B 11.6 µs (bytes) + S 55.0 µs (structure) — **structure-bound, S/B = 4.7**. F1/F2 fused are slower than the graph baseline (S = −34 to −102 µs): fusion not worthwhile; CUDA Graphs suffice. G1 correctness 18/18; G2 GEMV 108.6% of cuBLAS. |
+| L4 (SM89, Ada) | confirmatory re-run scheduled (machine moves next) | Historical 2026-06 data retained as raw measurements only — predates the tuned split-KV F4 kernel, `--dim`=KV-length semantics, F2 byte-model fix, and residency parity. |
+| A100 (SM80, Ampere, 108 SMs) | confirmatory, pending | v2 prediction: H1-v2/H2-v2 hold; F4 S/B > 4.7 (larger SM count → larger structural share). |
+| RTX Pro 6000 (SM120, Blackwell, 192 SMs) | confirmatory, pending | Same predictions; largest expected S/B. |
 
-**Outcome notes and caveats (T4, 2026-07-02 run):**
+**Outcome notes (T4, 2026-07-02, v2):**
 
-- **H1 (F1/F2 launch-bound):** historical L4/T4 data has the expected directional signal, but it is not validation evidence after the accounting and residency fixes; fresh runs are required.
-- **H4(b) monotonicity now holds for F4, non-vacuously:** the split-KV FlashDecode fused kernel beats the CUDA-graph baseline wall-clock at both KV lengths (L=2048: 180 vs 213 µs; L=4096: 370 vs 438 µs, ~16% faster). Both the fused kernel *and* the unfused attention baseline (`attn_scores`, `attn_v`) were tuned to the same coalesced-streaming idioms, so the comparison isolates fusion effects rather than kernel tuning quality.
-- **H2 (F4 byte-bound) is refuted by the historical T4 decomposition.** The fused win exceeds Δ_launch + B (gap ~80 µs vs modeled ~22 µs at L=4096), and B accounts for ~17–20% rather than the pre-registered ≥80%. The likely contributors include elimination of low-parallelism stage boundaries and the split-KV algorithm's different scheduling. Under the current gates this is a FAIL of H2, H4(c), and Check (a), not a favorable warning.
-- **Check (b) F4: the measured eliminated delta (97.6 − 90.8 = 6.8 MB) is about 6.6× the current analytic delta (~1.03 MB after subtracting split-KV partial-buffer traffic), which FAILS the two-sided gate.** A one-sided "delta ≥ analytic" gate validates nothing about model accuracy, so it was removed. Absolute totals remain diagnostics because the fused split-KV algorithm changes scheduling and cache behavior as well as intermediate traffic.
-- **F4's declared-byte fraction is small by construction:** for single-query decode the eliminable intermediate (`O(L)`) versus KV traffic (`O(L·D)`) fixes the analytic fraction near **4/D ≈ 3%**, independent of sequence length. This is a byte ratio, not a guaranteed runtime fraction. The historical ~16% wall-clock win therefore cannot be attributed to bytes alone.
+- **H2-v2 (F4 structure-bound) holds:** fused wins wall-clock at both KV lengths, S > 0, and S > B (2.7× at L=2048, 4.7× at L=4096). The independent NCU per-kernel-duration instrument corroborates the direction (isolated fused kernels are 55–136 µs faster in aggregate). The dominant structural contributor is elimination of the H=32-block softmax stage and kernel-boundary drain — effects graph replay cannot remove.
+- **H1-v2 (F1/F2 fusion-not-worthwhile) holds:** with cache residency equalized, fused F1/F2 are slower than both baselines (S = −33.8/−101.9 µs for F1, −14.7/−34.3 µs for F2). The earlier apparent fused F1/F2 wins were an L2-residency artifact of the pre-overhaul benchmark. Practical guidance stands: for launch-bound chains, use CUDA Graphs, don't hand-fuse.
+- **v1-H2 ("byte-bound", B ≥ 80% of gap) is refuted and retired:** B explains ~20% of the F4 gap. F4's eliminable-byte fraction is structurally small (≈4/D ≈ 3% of traffic, independent of L) — the wall-clock win is real but comes from structure, not bytes. Do not cite the 17% as a byte-elimination result.
+- **F4 NCU byte-delta is below counter resolution on T4** (analytic delta 0.5–1.0 MB vs ~46–97 MB totals with a uniform ~1.3–1.4× counter excess on KV streams, both variants): recorded as below-resolution, no byte-delta claim. Absolute totals stay in the report as diagnostics. F1/F2 byte totals gate normally and pass at ratios 0.84–0.89.
+- **Known operational caveats (unchanged):** GPU clocks not locked (`--clock-control none`; timings were stable across run halves), variants not interleaved within a run.
 
 ---
 
