@@ -71,6 +71,12 @@ struct KernelArgs {
 #endif
   float* probs;              // [n_heads, seq_len]  FP32 softmax output (unfused only)
 
+  // --- F4 split-KV FlashDecode scratch (fused variant only) ---
+  float* part_o;             // [n_heads, n_splits, head_dim]  unnormalized partial outputs
+  float* part_m;             // [n_heads, n_splits]            per-split running max
+  float* part_l;             // [n_heads, n_splits]            per-split exp-sum
+  int n_splits;              // KV splits per head (1 = no split)
+
   // --- Convenience dimension aliases (set to same values as spec fields) ---
   int d;                     // RMSNorm dimension (= d_in typically)
   int H;                     // heads (= n_heads)
@@ -91,6 +97,7 @@ struct KernelArgs {
       weight_replica_stride(0),
       g(nullptr), u(nullptr), xh(nullptr), Wg(nullptr), Wu(nullptr),
       probs(nullptr),
+      part_o(nullptr), part_m(nullptr), part_l(nullptr), n_splits(0),
       d(0), H(0), L(0), D(0), ff(0),
       fusion(FusionKind::F1_RMSNORM_GEMV) {}
 };

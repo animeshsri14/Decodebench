@@ -20,13 +20,13 @@ from decodebench.bytes_model import StageTrace, eliminable_bytes, total_bytes
 
 # ---- Byte model matching bench_variant.cu actual dimensions ----
 #
-# F1: bench_variant uses d_in=dim, d_out=14336 (hardcoded, line 219)
-# F2: bench_variant uses d_in=dim, d_out=14336 (hardcoded, line 395)
-# F4: bench_variant uses H=32, D=128, L=1024 (lines 580-582)
+# F1: bench_variant uses d_in=dim, d_out=14336 (hardcoded)
+# F2: bench_variant uses d_in=dim, d_out=14336 (hardcoded)
+# F4: bench_variant uses H=32, D=128, L=dim (dim is the KV-cache length)
 #
 # All values in bytes, FP16 = 2 bytes per element.
 _D_OUT_F1F2 = 14336  # bench_variant d_out for F1 and F2 (both use same hardcoded value)
-_L = 1024
+_N_HEADS = 32
 _HEAD_DIM = 128
 
 
@@ -53,8 +53,8 @@ def _traces_f2(dim):
 
 
 def _traces_f4(dim):
-    """attention scores -> softmax -> weighted V (H = dim // head_dim)."""
-    H, D, L = dim // _HEAD_DIM, _HEAD_DIM, _L
+    """attention scores -> softmax -> weighted V (dim = KV length L)."""
+    H, D, L = _N_HEADS, _HEAD_DIM, dim
     return [
         StageTrace("scores", reads=[H * D * 2, H * L * D * 2], write=H * L * 4, is_final=False),
         StageTrace("softmax", reads=[H * L * 4], write=H * L * 4, is_final=False),
@@ -192,6 +192,15 @@ def main():
     report_lines.append("")
 
     report_lines.append("## Check (a): Residual analysis (t_graph - t_fused - B)")
+    report_lines.append("")
+    report_lines.append(
+        "PASS means the fused speedup over the graph baseline is fully explained by "
+        "the byte-elimination bound B. A positive residual is a genuine model-bound "
+        "violation in the favorable direction: the fused kernel wins by MORE than "
+        "Δ_launch + B. Known unmodeled terms (see README Limitations): elimination of "
+        "inter-kernel serialization — low-parallelism interleaved stages (e.g. the "
+        "H-block softmax) and per-boundary drain/ramp that graph replay cannot remove."
+    )
     report_lines.append("")
     report_lines.append(
         "| Fusion | Dim | t_unfused_graph (us) | t_fused (us) | B (us) | Residual | Status |"

@@ -7,6 +7,10 @@
 //   bench_variant --fusion {f1,f2,f4} --variant {unfused-stream,unfused-graph,fused}
 //                 --dim {2048,4096} --batch {1,2,4,8} --trials 30 --target-ms 20
 //                 --seed 42 --csv <path> [--ncu-mode] [--skip-correctness]
+//
+// --dim semantics: F1/F2 hidden dimension d_in; F4 KV-cache length L
+// (H=32, D=128 fixed). --batch is a CSV label only (reserved; no kernel
+// is batched yet).
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +19,7 @@
 #include <ctime>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <cuda_runtime.h>
 
 #include "decodebench_val/kernel_args.h"
@@ -34,6 +39,8 @@ namespace fused {
   __global__ void f1_kernel(KernelArgs args);
   __global__ void f2_kernel(KernelArgs args);
   __global__ void f4_kernel(KernelArgs args);
+  __global__ void f4_partial_kernel(KernelArgs args);
+  __global__ void f4_reduce_kernel(KernelArgs args);
 }
 }}
 
@@ -593,10 +600,17 @@ static void bench_f4(const std::string& variant, int dim, int batch,
                      int trials, float target_ms, unsigned seed,
                      bool ncu_mode, bool skip_correctness,
                      FILE* csv_fp) {
-  // F4 dimensions: H=32, L=1024, D=128
+  // F4 dimensions: H and D are fixed (Llama-7B-style decode head config);
+  // --dim sets the KV-cache length L so sweeps vary the real problem size.
   const int H = 32;
-  const int L = 1024;
+  const int L = dim;
   const int D = 128;
+  if (L < 128 || L % 128 != 0) {
+    fprintf(stderr,
+            "F4: --dim is the KV length and must be a positive multiple of "
+            "128, got %d\n", dim);
+    exit(1);
+  }
 
   int l2 = l2_cache_bytes();
   cudaStream_t stream;
@@ -606,14 +620,29 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   auto h_K = random_half(H * L * D, &seed, 0.02f);
   auto h_V = random_half(H * L * D, &seed, 0.02f);
 
+  // Split-KV split count: one KV tile (TILE_L=128 rows) per block. Empirically
+  // fastest on T4 at every measured L (max parallelism; per-block work is a
+  // single streaming pass). DECODEBENCH_F4_SPLITS overrides for per-GPU tuning
+  // experiments on other architectures.
+  const int num_tiles = L / 128;
+  int n_splits = num_tiles;
+  if (const char* env_splits = getenv("DECODEBENCH_F4_SPLITS")) {
+    int v = atoi(env_splits);
+    if (v >= 1) n_splits = std::min(num_tiles, v);
+  }
+
   __half *d_q, *d_K, *d_V, *d_out;
   float  *d_scores, *d_probs;
+  float  *d_part_o, *d_part_m, *d_part_l;
   CUDA_CHECK(cudaMalloc(&d_q, H * D * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_K, H * L * D * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_V, H * L * D * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_out, H * D * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_scores, H * L * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_probs, H * L * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_part_o, static_cast<size_t>(H) * n_splits * D * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_part_m, H * n_splits * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_part_l, H * n_splits * sizeof(float)));
 
   CUDA_CHECK(cudaMemcpy(d_q, h_q.data(), H * D * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), H * L * D * sizeof(__half), cudaMemcpyHostToDevice));
@@ -622,9 +651,18 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   KernelArgs args;
   args.q = d_q; args.K = d_K; args.V = d_V; args.out = d_out;
   args.scores = d_scores; args.probs = d_probs;
+  args.part_o = d_part_o; args.part_m = d_part_m; args.part_l = d_part_l;
+  args.n_splits = n_splits;
   args.H = H; args.L = L; args.D = D;
 
-  int scores_grid = H * div_up(L, 256);
+  int scores_grid = div_up(H * L, 8);  // one warp per score element
+
+  // Fused variant = split-KV FlashDecode: 2 launches (partial + merge),
+  // scores/probs never touch global memory.
+  auto launch_fused = [&]() {
+    kernels::fused::f4_partial_kernel<<<H * n_splits, 256, 0, stream>>>(args);
+    kernels::fused::f4_reduce_kernel<<<H, D, 0, stream>>>(args);
+  };
 
   bool correctness_ok = true;
   if (!skip_correctness) {
@@ -633,18 +671,25 @@ static void bench_f4(const std::string& variant, int dim, int batch,
     // Unfused path
     kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
     kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-    kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+    kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_gpu.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
 
-    // Fused path
+    // Fused path (split-KV)
     args.out = d_out;
-    kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+    launch_fused();
     CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpy(h_fused.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
 
-    // For F4, unfused vs fused comparison
-    correctness_ok = correctness_pass(h_fused, h_gpu, H * D);
+    // Single-block reference kernel as a second witness
+    std::vector<__half> h_ref(H * D);
+    kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaMemcpy(h_ref.data(), d_out, H * D * sizeof(__half), cudaMemcpyDeviceToHost));
+
+    // Split-KV must match both the unfused chain and the reference kernel
+    correctness_ok = correctness_pass(h_fused, h_gpu, H * D) &&
+                     correctness_pass(h_fused, h_ref, H * D);
   }
 
   // Timing
@@ -655,11 +700,11 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   // Warmup
   for (int w = 0; w < 50; ++w) {
     if (variant == "fused") {
-      kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+      launch_fused();
     } else {
       kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
       kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-      kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+      kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
     }
   }
   CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -669,11 +714,11 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   {
     CUDA_CHECK(cudaEventRecord(ev_start, stream));
     if (variant == "fused") {
-      kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+      launch_fused();
     } else {
       kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
       kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-      kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+      kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
     }
     CUDA_CHECK(cudaEventRecord(ev_stop, stream));
     CUDA_CHECK(cudaEventSynchronize(ev_stop));
@@ -691,7 +736,7 @@ static void bench_f4(const std::string& variant, int dim, int batch,
     CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
     kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
     kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-    kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+    kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
     CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
     CUDA_CHECK(cudaGraphInstantiate(&graph_inst, graph, nullptr, nullptr, 0));
   }
@@ -700,13 +745,13 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   for (int trial = 0; trial < trials; ++trial) {
     if (ncu_mode) {
       if (variant == "fused") {
-        kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+        launch_fused();
       } else if (variant == "unfused-graph") {
         CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
       } else {
         kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
         kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-        kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+        kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
       }
       CUDA_CHECK(cudaStreamSynchronize(stream));
 	      fprintf(csv_fp, "%s,f4,%s,%d,%d,%d,%d,0,%.3f,%d,%ld\n",
@@ -718,13 +763,13 @@ static void bench_f4(const std::string& variant, int dim, int batch,
     CUDA_CHECK(cudaEventRecord(ev_trial_start, stream));
     for (int k = 0; k < K; ++k) {
       if (variant == "fused") {
-        kernels::fused::f4_kernel<<<H, 256, 0, stream>>>(args);
+        launch_fused();
       } else if (variant == "unfused-graph") {
         CUDA_CHECK(cudaGraphLaunch(graph_inst, stream));
       } else {
         kernels::unfused::attn_scores_kernel<<<scores_grid, 256, 0, stream>>>(args);
         kernels::unfused::softmax_kernel<<<H, 256, 0, stream>>>(args);
-        kernels::unfused::attn_v_kernel<<<H * D, 256, 0, stream>>>(args);
+        kernels::unfused::attn_v_kernel<<<H * (D / 32), 256, 0, stream>>>(args);
       }
     }
     CUDA_CHECK(cudaEventRecord(ev_trial_stop, stream));
@@ -745,6 +790,7 @@ static void bench_f4(const std::string& variant, int dim, int batch,
   CUDA_CHECK(cudaEventDestroy(ev_trial_start)); CUDA_CHECK(cudaEventDestroy(ev_trial_stop));
   CUDA_CHECK(cudaFree(d_q)); CUDA_CHECK(cudaFree(d_K)); CUDA_CHECK(cudaFree(d_V));
   CUDA_CHECK(cudaFree(d_out)); CUDA_CHECK(cudaFree(d_scores)); CUDA_CHECK(cudaFree(d_probs));
+  CUDA_CHECK(cudaFree(d_part_o)); CUDA_CHECK(cudaFree(d_part_m)); CUDA_CHECK(cudaFree(d_part_l));
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
