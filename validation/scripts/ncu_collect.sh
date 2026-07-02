@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ncu_collect.sh — collect NCU metrics for DecodeBench validation
-# Wraps ncu over F1/F2/F4 × {unfused-stream, fused} at dim=4096, B=1.
-# Output: ncu_raw_{fusion}_{variant}.csv (one per combination), then
+# Wraps ncu over F1/F2/F4 × {unfused-stream, fused} × dim {2048, 4096}, B=1.
+# Output: ncu_raw_{fusion}_{variant}_{dim}.csv (one per combination), then
 #         ncu_metrics.csv via analysis/parse_ncu.py.
 set -euo pipefail
 
@@ -25,16 +25,19 @@ fi
 OUTPUT_DIR="${VAL_DIR}/results"
 mkdir -p "$OUTPUT_DIR"
 
-NCU_METRICS="dram__bytes_read.sum,dram__bytes_write.sum,lts__t_sector_hit_rate.pct,dram__throughput.avg.pct_of_peak_sustained_elapsed"
+# gpu__time_duration.sum feeds the v2 structural term S: per-kernel isolated
+# execution durations, summed per round (see analysis/parse_ncu.py and
+# validation/PREREGISTRATION-v2.md).
+NCU_METRICS="dram__bytes_read.sum,dram__bytes_write.sum,lts__t_sector_hit_rate.pct,dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__time_duration.sum"
 
 run_ncu() {
   local fusion="$1"
   local variant="$2"
-  local dim=4096
+  local dim="$3"
   local batch=1
-  local raw_csv="${OUTPUT_DIR}/ncu_raw_${fusion}_${variant}.csv"
+  local raw_csv="${OUTPUT_DIR}/ncu_raw_${fusion}_${variant}_${dim}.csv"
 
-  echo "--- NCU: $fusion / $variant ---"
+  echo "--- NCU: $fusion / $variant / dim=$dim ---"
 
   # Fail-closed: an NCU failure or empty output aborts collection. A missing
   # counter file must not silently flow downstream as "N/A".
@@ -56,22 +59,24 @@ run_ncu() {
       --csv /dev/null
 
   if [ ! -s "$raw_csv" ]; then
-    echo "ERROR: no NCU output for $fusion/$variant ($raw_csv missing or empty)" >&2
+    echo "ERROR: no NCU output for $fusion/$variant/dim=$dim ($raw_csv missing or empty)" >&2
     exit 1
   fi
 }
 
-# F1: RMSNorm→GEMV
-run_ncu f1 unfused-stream
-run_ncu f1 fused
+for dim in 2048 4096; do
+  # F1: RMSNorm→GEMV
+  run_ncu f1 unfused-stream "$dim"
+  run_ncu f1 fused "$dim"
 
-# F2: GEMV→SwiGLU
-run_ncu f2 unfused-stream
-run_ncu f2 fused
+  # F2: GEMV→SwiGLU
+  run_ncu f2 unfused-stream "$dim"
+  run_ncu f2 fused "$dim"
 
-# F4: FlashDecode attention
-run_ncu f4 unfused-stream
-run_ncu f4 fused
+  # F4: FlashDecode attention
+  run_ncu f4 unfused-stream "$dim"
+  run_ncu f4 fused "$dim"
+done
 
 # Aggregate raw per-metric rows into ncu_metrics.csv (round-aware median)
 python3 "${VAL_DIR}/analysis/parse_ncu.py" --results-dir "$OUTPUT_DIR"

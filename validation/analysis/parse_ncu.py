@@ -20,6 +20,7 @@ import statistics
 
 FUSIONS = ["f1", "f2", "f4"]
 VARIANTS = ["unfused-stream", "fused"]
+DIMS = ["2048", "4096"]
 
 
 def find_round_size(kernel_sequence):
@@ -47,10 +48,30 @@ def find_round_size(kernel_sequence):
     )
 
 
+_DURATION_UNIT_TO_US = {
+    "nsecond": 1e-3,
+    "ns": 1e-3,
+    "usecond": 1.0,
+    "us": 1.0,
+    "usec": 1.0,
+    "msecond": 1e3,
+    "ms": 1e3,
+    "second": 1e6,
+    "s": 1e6,
+}
+
+
 def parse_ncu_file(path):
-    """Parse one ncu_raw file, return (median_read_bytes, median_write_bytes)."""
+    """Parse one ncu_raw file.
+
+    Returns (median_read_bytes, median_write_bytes, median_kernel_time_us),
+    where kernel_time_us is the per-round SUM of isolated per-kernel GPU
+    durations (gpu__time_duration.sum) — the τ_v quantity of the v2
+    decomposition (PREREGISTRATION-v2.md). None entries mean the metric was
+    absent from the capture.
+    """
     if not os.path.exists(path):
-        return None, None
+        return None, None, None
 
     with open(path, newline="", encoding="utf-8") as f:
         lines = [line for line in f if not line.startswith("==")]
@@ -58,9 +79,9 @@ def parse_ncu_file(path):
     reader = csv.DictReader(lines)
     rows = list(reader)
     if not rows:
-        return None, None
+        return None, None, None
 
-    # Collect per-invocation DRAM bytes
+    # Collect per-invocation DRAM bytes and durations
     by_id = {}
     kernel_sequence = []  # ordered list of (id, kernel_name)
 
@@ -74,38 +95,57 @@ def parse_ncu_file(path):
         kname = row["Kernel Name"].strip()
 
         if inv_id not in by_id:
-            by_id[inv_id] = {"kernel": kname, "read": 0.0, "write": 0.0}
+            by_id[inv_id] = {"kernel": kname, "read": 0.0, "write": 0.0,
+                             "dur_us": None}
             kernel_sequence.append((inv_id, kname))
 
         if "dram__bytes_read" in metric:
             by_id[inv_id]["read"] += val
         elif "dram__bytes_write" in metric:
             by_id[inv_id]["write"] += val
+        elif "gpu__time_duration" in metric:
+            unit = (row.get("Metric Unit") or "").strip().lower()
+            scale = _DURATION_UNIT_TO_US.get(unit)
+            if scale is None:
+                raise ValueError(
+                    f"Unrecognized duration unit {unit!r} in {path}; refusing "
+                    "to guess a time scale."
+                )
+            prev = by_id[inv_id]["dur_us"] or 0.0
+            by_id[inv_id]["dur_us"] = prev + val * scale
 
     if not by_id:
-        return None, None
+        return None, None, None
 
     round_size = find_round_size(kernel_sequence)
     sorted_ids = sorted(by_id.keys())
 
     # Build per-round totals
-    reads, writes = [], []
+    reads, writes, durs = [], [], []
+    have_all_durs = True
     for r_start in range(0, len(sorted_ids), round_size):
         chunk = sorted_ids[r_start : r_start + round_size]
         if len(chunk) < round_size:
             break  # incomplete trailing round
         reads.append(sum(by_id[i]["read"] for i in chunk))
         writes.append(sum(by_id[i]["write"] for i in chunk))
+        if any(by_id[i]["dur_us"] is None for i in chunk):
+            have_all_durs = False
+        else:
+            durs.append(sum(by_id[i]["dur_us"] for i in chunk))
 
     if not reads:
-        return None, None
+        return None, None, None
 
     # Skip first round (warmup), take median of the rest; fall back to all if only 1 round
     if len(reads) > 1:
         reads = reads[1:]
         writes = writes[1:]
+    if len(durs) > 1:
+        durs = durs[1:]
 
-    return statistics.median(reads), statistics.median(writes)
+    dur_med = statistics.median(durs) if (durs and have_all_durs) else None
+    return statistics.median(reads), statistics.median(writes), dur_med
 
 
 def main():
@@ -124,36 +164,48 @@ def main():
     rows = []
     for fusion in FUSIONS:
         for variant in VARIANTS:
-            fname = f"ncu_raw_{fusion}_{variant}.csv"
-            path = os.path.join(results_dir, fname)
-            read_bytes, write_bytes = parse_ncu_file(path)
+            for dim in DIMS:
+                fname = f"ncu_raw_{fusion}_{variant}_{dim}.csv"
+                path = os.path.join(results_dir, fname)
+                read_bytes, write_bytes, kernel_time_us = parse_ncu_file(path)
 
-            if read_bytes is None:
-                # Emit a zero row: compare.py's completeness gate (G0) treats
-                # zero-byte cells as missing data and FAILs the run.
-                print(f"  WARNING: no data for {fusion}/{variant} ({fname}); "
-                      "compare.py will FAIL this cell")
-                read_bytes, write_bytes = 0.0, 0.0
-            else:
-                total_mb = (read_bytes + write_bytes) / 1e6
-                print(
-                    f"  {fusion}/{variant}: read={read_bytes/1e6:.2f} MB "
-                    f"write={write_bytes/1e6:.2f} MB total={total_mb:.2f} MB"
+                if read_bytes is None:
+                    # Emit a zero row: compare.py's completeness gate (G0)
+                    # treats zero-byte cells as missing data and FAILs the run.
+                    print(f"  WARNING: no data for {fusion}/{variant}/dim={dim} "
+                          f"({fname}); compare.py will FAIL this cell")
+                    read_bytes, write_bytes = 0.0, 0.0
+                else:
+                    total_mb = (read_bytes + write_bytes) / 1e6
+                    dur_str = (f" kernel_time={kernel_time_us:.2f} us"
+                               if kernel_time_us is not None else
+                               " kernel_time=MISSING (duration metric absent)")
+                    print(
+                        f"  {fusion}/{variant}/dim={dim}: "
+                        f"read={read_bytes/1e6:.2f} MB "
+                        f"write={write_bytes/1e6:.2f} MB total={total_mb:.2f} MB"
+                        f"{dur_str}"
+                    )
+                if kernel_time_us is None:
+                    # Zero means missing: G0 fails the cell (fail-closed).
+                    kernel_time_us = 0.0
+
+                rows.append(
+                    {
+                        "fusion": fusion,
+                        "variant": variant,
+                        "dim": dim,
+                        "dram_bytes_read": int(read_bytes),
+                        "dram_bytes_write": int(write_bytes),
+                        "kernel_time_us": round(kernel_time_us, 3),
+                    }
                 )
-
-            rows.append(
-                {
-                    "fusion": fusion,
-                    "variant": variant,
-                    "dram_bytes_read": int(read_bytes),
-                    "dram_bytes_write": int(write_bytes),
-                }
-            )
 
     os.makedirs(results_dir, exist_ok=True)
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["fusion", "variant", "dram_bytes_read", "dram_bytes_write"]
+            f, fieldnames=["fusion", "variant", "dim", "dram_bytes_read",
+                           "dram_bytes_write", "kernel_time_us"]
         )
         writer.writeheader()
         writer.writerows(rows)
