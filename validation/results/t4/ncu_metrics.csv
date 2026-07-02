@@ -1,7 +1,7 @@
 fusion,variant,dram_bytes_read,dram_bytes_write
-f1,unfused-stream,130758240,44800
-f1,fused,137501376,46368
-f2,unfused-stream,261527008,89600
-f2,fused,274374784,48544
-f4,unfused-stream,27541152,81728
-f4,fused,23924512,14400
+f1,unfused-stream,130741696,1363040
+f1,fused,137696064,1354848
+f2,unfused-stream,261577600,2740896
+f2,fused,274560032,1368192
+f4,unfused-stream,94179808,3410208
+f4,fused,88813152,1966080
