@@ -23,3 +23,50 @@ jobs:
           cmake -S validation -B validation/build-ci -DDECODEBENCH_CPU_ONLY=ON
           cmake --build validation/build-ci -j2
           ctest --test-dir validation/build-ci --output-on-failure
+
+  # Package must be installable from a built wheel, not just editable mode.
+  build-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Install from wheel and smoke-test
+        run: |
+          pip install dist/*.whl
+          python -c "import decodebench"
+          decodebench demo f1 --dry-run
+
+  # Compile-only CUDA build (no GPU on the runner): catches nvcc breakage
+  # per target architecture. Runtime GPU behavior is validated on the
+  # benchmark machines, not here.
+  cuda-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda-arch: ["75", "89", "120"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: "12.9.0"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+          non-cuda-sub-packages: '["libcublas-dev"]'
+      - name: Configure
+        run: >
+          cmake -S validation -B validation/build-cuda
+          -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda-arch }}
+          -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build validation/build-cuda -j2
+      - name: Assert GPU targets were actually built
+        run: |
+          test -x validation/build-cuda/bench_variant
+          test -x validation/build-cuda/calibrate

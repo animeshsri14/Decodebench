@@ -79,6 +79,28 @@ fi
 # instead of systematically biasing whichever variant ran last.
 NPASSES=3
 TRIALS_PER_PASS=10
+
+# ---- Run manifest (environment provenance for the raw data) ----
+MANIFEST="${RESULTS_DIR}/manifest.json"
+{
+  echo "{"
+  echo "  \"generated\": \"$(date -Is)\","
+  echo "  \"commit\": \"$(git -C "$PROJ_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)\","
+  echo "  \"gpu_name\": \"$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo unknown)\","
+  echo "  \"driver\": \"$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo unknown)\","
+  echo "  \"gpu_count\": \"$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | head -1 || echo unknown)\","
+  echo "  \"nvcc\": \"$(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*' || echo unknown)\","
+  echo "  \"gxx\": \"$(g++-14 --version 2>/dev/null | head -1 || g++ --version 2>/dev/null | head -1 || echo unknown)\","
+  echo "  \"clocks_locked\": ${CLOCKS_LOCKED},"
+  echo "  \"max_sm_clock_mhz\": \"${MAX_SM_CLOCK:-unknown}\","
+  echo "  \"npasses\": ${NPASSES},"
+  echo "  \"trials_per_pass\": ${TRIALS_PER_PASS},"
+  echo "  \"variant_order\": \"rotated interleaved: (vi + pass) % nvariants\","
+  echo "  \"seed\": 42,"
+  echo "  \"target_ms\": 20"
+  echo "}"
+} > "$MANIFEST"
+echo "Run manifest written to $MANIFEST"
 NVAR=${#VARIANTS[@]}
 for ((pass = 0; pass < NPASSES; pass++)); do
   for fusion in $FUSIONS; do
