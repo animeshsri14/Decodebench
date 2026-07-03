@@ -55,24 +55,49 @@ echo "gpu_name,fusion,variant,dim,batch,trial,iters,us_per_invocation,correctnes
 # batch is fixed at 1: the kernels are unbatched and bench_variant rejects
 # any other value (a batch sweep here previously produced fictitious data).
 FUSIONS="f1 f2 f4"
-VARIANTS="unfused-stream unfused-graph fused"
+VARIANTS=(unfused-stream unfused-graph fused)
 DIMS="2048 4096"
 
-for fusion in $FUSIONS; do
-  for variant in $VARIANTS; do
+# Best-effort clock locking: lock SM clocks to the reported maximum so slow
+# clock drift cannot bias late-running variants. Fails harmlessly (recorded
+# as a WARNING) on vGPU guests and hosts without permission — the interleaved
+# passes below are the drift defense that always applies.
+CLOCKS_LOCKED=0
+MAX_SM_CLOCK="$(nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || true)"
+if [ -n "${MAX_SM_CLOCK}" ] && [ "${MAX_SM_CLOCK}" != "[N/A]" ] \
+   && sudo -n nvidia-smi -lgc "${MAX_SM_CLOCK},${MAX_SM_CLOCK}" >/dev/null 2>&1; then
+  CLOCKS_LOCKED=1
+  echo "GPU SM clocks locked at ${MAX_SM_CLOCK} MHz"
+  trap 'sudo -n nvidia-smi -rgc >/dev/null 2>&1 || true' EXIT
+else
+  echo "WARNING: could not lock GPU clocks (vGPU guest or no passwordless sudo);"
+  echo "         timings run at default clocks. Recorded as a run deviation."
+fi
+
+# Variants are measured in NPASSES rotated interleaved passes (same 30 total
+# trials per cell as before) so thermal/clock drift spreads across variants
+# instead of systematically biasing whichever variant ran last.
+NPASSES=3
+TRIALS_PER_PASS=10
+NVAR=${#VARIANTS[@]}
+for ((pass = 0; pass < NPASSES; pass++)); do
+  for fusion in $FUSIONS; do
     for dim in $DIMS; do
-      echo "  bench_variant --fusion $fusion --variant $variant --dim $dim"
-      # A failed benchmark aborts the pipeline (fail-closed): a partial grid
-      # must not flow into compare.py as if it were a complete run.
-      "$BENCH_BIN" \
-        --fusion "$fusion" \
-        --variant "$variant" \
-        --dim "$dim" \
-        --batch 1 \
-        --trials 30 \
-        --target-ms 20 \
-        --seed 42 \
-        --csv /dev/stdout | tail -n +2 >> "$TIMING_CSV"
+      for ((vi = 0; vi < NVAR; vi++)); do
+        variant="${VARIANTS[$(((vi + pass) % NVAR))]}"
+        echo "  [pass $((pass + 1))/${NPASSES}] bench_variant --fusion $fusion --variant $variant --dim $dim"
+        # A failed benchmark aborts the pipeline (fail-closed): a partial grid
+        # must not flow into compare.py as if it were a complete run.
+        "$BENCH_BIN" \
+          --fusion "$fusion" \
+          --variant "$variant" \
+          --dim "$dim" \
+          --batch 1 \
+          --trials "${TRIALS_PER_PASS}" \
+          --target-ms 20 \
+          --seed 42 \
+          --csv /dev/stdout | tail -n +2 >> "$TIMING_CSV"
+      done
     done
   done
 done
