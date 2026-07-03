@@ -163,3 +163,44 @@ Blackwell run. Gates and tolerances unchanged per change control below.
   ("Validation status") and in `results/t4/validation_report.md`.
 - Any further gate change after confirmatory data exists must be recorded
   the same way: a dated section here, with the pre-change outcome reported.
+
+### 2026-07-03 — Reporting-status change: INDETERMINATE (no threshold changed)
+
+**What changed.** Two check outcomes that previously recorded PASS while
+explicitly making no claim now record a separate INDETERMINATE status
+(`validation/analysis/compare.py`):
+
+1. **Check (a) τ sign corroboration:** when either instrument's gap magnitude
+   is inside the ±5 µs near-zero band, no direction can be established for
+   that instrument, so corroboration can be claimed neither way. Previously
+   this "passed vacuously" — e.g. wall −14.27 µs vs τ −2.05 µs (T4 f2/2048)
+   counted as corroborated, which overstated evidential support (external
+   review, 2026-07-03).
+2. **Check (b) F4 byte delta below counter resolution:** previously
+   "PASS (below resolution — no claim)"; the no-claim semantics were correct
+   but the PASS tally inflated the count of supported claims.
+
+INDETERMINATE adds no evidential support (not a PASS) and does not gate
+(not a FAIL); overall verdicts and exit codes are computed exactly as
+before. **No gate, tolerance, band, or hypothesis condition changed.**
+Also in this change: S is consistently described as the *unexplained
+residual* (the registered "structural term" name is preserved here; the
+mechanism story was always a hypothesis and sign corroboration never
+established it).
+
+**Pre-change vs post-change outcomes** (reports regenerated from the
+committed CSVs; every PASS→INDETERMINATE reclassification listed):
+
+- **T4:** 76 PASS / 0 FAIL → **73 PASS / 3 INDETERMINATE / 0 FAIL, Overall
+  PASS (unchanged)**. Reclassified: (a) f2/2048 (wall −14.27 µs, τ −2.05 µs
+  in band — the corroboration claim for this cell is withdrawn); (b)
+  f4/delta/2048 and f4/delta/4096 (below resolution).
+- **L4:** 74 PASS / 2 FAIL → **69 PASS / 5 INDETERMINATE / 2 FAIL, Overall
+  FAIL (unchanged)**. Reclassified: (a) f1/2048 (wall −3.38 µs in band,
+  τ −6.62 µs), f4/2048 and f4/4096 (both instruments in band — ties); (b)
+  f4/delta/2048 and f4/delta/4096. The previously reported "τ
+  sign-corroboration 6/6" is now 3 corroborated / 3 indeterminate; the
+  H2-v2 refutation rests on the (H) gate and wall-clock medians and is
+  unaffected.
+- **RTX Pro 6000:** 42 PASS / 12 FAIL → **unchanged** (no NCU cells exist,
+  so checks (a)/(b) never ran; the 12 FAILs remain G0 missing-NCU).

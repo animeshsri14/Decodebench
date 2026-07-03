@@ -1,5 +1,5 @@
 # DecodeBench Validation Report
-Generated: 2026-07-03T18:51:04.149296
+Generated: 2026-07-03T21:58:43.528745
 
 ## Check (G0): Data completeness
 
@@ -42,16 +42,16 @@ Every expected (fusion, dim, batch, variant) config must be present with usable 
 | f4 | 4096 | unfused-graph | 1 | PASS |
 | f4 | 4096 | fused | 1 | PASS |
 
-## Check (a): Structural decomposition t_graph − t_fused = B + S, τ corroboration
+## Check (a): Decomposition t_graph − t_fused = B + S (unexplained residual), τ corroboration
 
-v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the structural term S = (t_graph − t_fused) − B. The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap, unless either magnitude is within the 5 µs near-zero band. τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
+v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the unexplained residual S = (t_graph − t_fused) − B (registered under the name 'structural term'; S is a residual, not a measured mechanism). The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap. If either magnitude is within the 5 µs near-zero band, no direction can be established and the check is INDETERMINATE — no corroboration claim either way (2026-07-03 change control; previously a vacuous PASS). τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
 
 | Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | τ_u−τ_f (us) | Status |
 |--------|-----|-------------|-------------|----------|--------|--------|--------------|--------|
 
 ## Check (b): Analytic bytes vs NCU DRAM bytes
 
-F1/F2 gate on absolute totals per dim (tolerance ±20%; analytic is a lower bound; cache-line granularity and L2 thrashing add measured ~10-15% on weight streams). F4 gates on the eliminated DELTA, two-sided ±50%, but ONLY when the analytic delta is at least 5% of the smaller variant total: below that the signal sits under the DRAM-counter noise floor (uniform ~1.3-1.4x excess on KV streams observed on T4, both variants) and the check records below-resolution — no byte-delta claim is made either way. The v2 byte term for F4 is B inside the check (a) decomposition, not this counter delta.
+F1/F2 gate on absolute totals per dim (tolerance ±20%; analytic is a lower bound; cache-line granularity and L2 thrashing add measured ~10-15% on weight streams). F4 gates on the eliminated DELTA, two-sided ±50%, but ONLY when the analytic delta is at least 5% of the smaller variant total: below that the signal sits under the DRAM-counter noise floor (uniform ~1.3-1.4x excess on KV streams observed on T4, both variants) and the check records INDETERMINATE — no byte-delta claim is made either way, and the cell adds no evidential support (2026-07-03 change control; previously a no-claim PASS). The v2 byte term for F4 is B inside the check (a) decomposition, not this counter delta.
 
 | Fusion | Dim | Variant | Analytic (MB) | NCU DRAM (MB) | Ratio | Status |
 |--------|-----|---------|---------------|---------------|-------|--------|
@@ -85,6 +85,7 @@ H1-v2 (F1/F2, launch-bound / fusion-not-worthwhile): fusion yields no wall-clock
 ## Summary
 
 - PASS: 42
+- INDETERMINATE: 0 (check ran but could establish no claim either way; adds no evidential support, does not gate)
 - WARN: 0 (warnings never count as passes)
 - FAIL: 12
 - **Overall: FAIL**

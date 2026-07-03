@@ -10,8 +10,8 @@ from validation.analysis.compare import (
     f4_delta_detectable,
     relative_delta_matches,
     residual_matches_model,
+    residual_term,
     sign_corroborated,
-    structural_term,
 )
 from validation.analysis.parse_ncu import find_round_size
 
@@ -22,20 +22,23 @@ def test_residual_gate_is_two_sided():
     assert not residual_matches_model(100.0, 120.0, 1.0)[0]
 
 
-def test_structural_term_sign_convention():
-    # Fused faster than graph by more than B -> positive S (structure removed)
-    assert structural_term(384.0, 318.0, 11.6) > 0
-    # Fused slower than graph -> negative S (structure added)
-    assert structural_term(220.0, 253.0, 0.03) < 0
+def test_residual_term_sign_convention():
+    # Fused faster than graph by more than B -> positive S
+    assert residual_term(384.0, 318.0, 11.6) > 0
+    # Fused slower than graph -> negative S
+    assert residual_term(220.0, 253.0, 0.03) < 0
 
 
 def test_sign_corroboration_requires_agreement_outside_noise():
-    assert sign_corroborated(66.0, 136.0)          # both positive
-    assert sign_corroborated(-102.0, -154.0)       # both negative
-    assert not sign_corroborated(66.0, -136.0)     # disagreement, both large
-    # Either magnitude inside the 5 us band -> indeterminate -> pass
-    assert sign_corroborated(-14.0, -2.0)
-    assert sign_corroborated(3.0, -136.0)
+    assert sign_corroborated(66.0, 136.0) == "PASS"       # both positive
+    assert sign_corroborated(-102.0, -154.0) == "PASS"    # both negative
+    assert sign_corroborated(66.0, -136.0) == "FAIL"      # disagreement, both large
+    # Either magnitude inside the 5 us band: no direction can be established
+    # for that instrument, so no corroboration claim either way (2026-07-03
+    # change control: these were previously vacuous PASSes).
+    assert sign_corroborated(-14.0, -2.0) == "INDETERMINATE"
+    assert sign_corroborated(3.0, -136.0) == "INDETERMINATE"
+    assert sign_corroborated(2.0, 1.0) == "INDETERMINATE"  # both in band (tie)
 
 
 def test_f4_delta_detectability_floor():
@@ -57,6 +60,17 @@ def test_warnings_are_not_a_valid_pass():
     checks = Checks()
     checks.add("dev", "missing", "WARN")
     assert checks.overall() == "INCOMPLETE"
+
+
+def test_indeterminate_neither_passes_nor_gates():
+    checks = Checks()
+    checks.add("a", "tie-cell", "INDETERMINATE")
+    checks.add("b", "real-pass", "PASS")
+    c = checks.counts()
+    assert c["INDETERMINATE"] == 1 and c["PASS"] == 1
+    # Does not gate (no FAIL/WARN -> overall PASS) but is counted separately,
+    # never inflating the PASS tally.
+    assert checks.overall() == "PASS"
 
 
 def test_ncu_round_detection_rejects_nonperiodic_sequence():

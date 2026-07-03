@@ -1,5 +1,5 @@
 # DecodeBench Validation Report
-Generated: 2026-07-02T21:35:34.727192
+Generated: 2026-07-03T21:58:43.343419
 
 ## Check (G0): Data completeness
 
@@ -30,22 +30,22 @@ Every expected (fusion, dim, batch, variant) config must be present with usable 
 | f4 | 4096 | unfused-graph | 1 | PASS |
 | f4 | 4096 | fused | 1 | PASS |
 
-## Check (a): Structural decomposition t_graph − t_fused = B + S, τ corroboration
+## Check (a): Decomposition t_graph − t_fused = B + S (unexplained residual), τ corroboration
 
-v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the structural term S = (t_graph − t_fused) − B. The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap, unless either magnitude is within the 5 µs near-zero band. τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
+v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the unexplained residual S = (t_graph − t_fused) − B (registered under the name 'structural term'; S is a residual, not a measured mechanism). The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap. If either magnitude is within the 5 µs near-zero band, no direction can be established and the check is INDETERMINATE — no corroboration claim either way (2026-07-03 change control; previously a vacuous PASS). τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
 
 | Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | τ_u−τ_f (us) | Status |
 |--------|-----|-------------|-------------|----------|--------|--------|--------------|--------|
 | f1 | 2048 | 219.62 | 253.43 | -33.81 | 0.03 | -33.84 | -38.94 | PASS |
 | f1 | 4096 | 435.23 | 537.09 | -101.87 | 0.06 | -101.93 | -153.79 | PASS |
-| f2 | 2048 | 425.73 | 439.99 | -14.27 | 0.42 | -14.68 | -2.05 | PASS |
+| f2 | 2048 | 425.73 | 439.99 | -14.27 | 0.42 | -14.68 | -2.05 | INDETERMINATE |
 | f2 | 4096 | 844.47 | 878.39 | -33.92 | 0.41 | -34.33 | -22.75 | PASS |
 | f4 | 2048 | 187.56 | 166.30 | 21.26 | 5.68 | 15.58 | 55.23 | PASS |
 | f4 | 4096 | 384.16 | 317.53 | 66.63 | 11.64 | 54.99 | 135.78 | PASS |
 
 ## Check (b): Analytic bytes vs NCU DRAM bytes
 
-F1/F2 gate on absolute totals per dim (tolerance ±20%; analytic is a lower bound; cache-line granularity and L2 thrashing add measured ~10-15% on weight streams). F4 gates on the eliminated DELTA, two-sided ±50%, but ONLY when the analytic delta is at least 5% of the smaller variant total: below that the signal sits under the DRAM-counter noise floor (uniform ~1.3-1.4x excess on KV streams observed on T4, both variants) and the check records below-resolution — no byte-delta claim is made either way. The v2 byte term for F4 is B inside the check (a) decomposition, not this counter delta.
+F1/F2 gate on absolute totals per dim (tolerance ±20%; analytic is a lower bound; cache-line granularity and L2 thrashing add measured ~10-15% on weight streams). F4 gates on the eliminated DELTA, two-sided ±50%, but ONLY when the analytic delta is at least 5% of the smaller variant total: below that the signal sits under the DRAM-counter noise floor (uniform ~1.3-1.4x excess on KV streams observed on T4, both variants) and the check records INDETERMINATE — no byte-delta claim is made either way, and the cell adds no evidential support (2026-07-03 change control; previously a no-claim PASS). The v2 byte term for F4 is B inside the check (a) decomposition, not this counter delta.
 
 | Fusion | Dim | Variant | Analytic (MB) | NCU DRAM (MB) | Ratio | Status |
 |--------|-----|---------|---------------|---------------|-------|--------|
@@ -57,10 +57,10 @@ F1/F2 gate on absolute totals per dim (tolerance ±20%; analytic is a lower boun
 | f2 | 2048 | fused | 117.59 | 138.12 | 0.85 | PASS |
 | f2 | 4096 | unfused-stream | 235.04 | 264.13 | 0.89 | PASS |
 | f2 | 4096 | fused | 235.04 | 276.00 | 0.85 | PASS |
-| f4 | 2048 | delta (unfused−fused) | 0.52 | 3.45 | 6.69 | PASS (below resolution — no claim) |
+| f4 | 2048 | delta (unfused−fused) | 0.52 | 3.45 | 6.69 | INDETERMINATE (below resolution — no claim) |
 | f4 | 2048 | unfused-stream (diagnostic) | 34.62 | 49.23 | 0.70 | — |
 | f4 | 2048 | fused (diagnostic) | 34.62 | 45.78 | 0.76 | — |
-| f4 | 4096 | delta (unfused−fused) | 1.03 | 6.99 | 6.77 | PASS (below resolution — no claim) |
+| f4 | 4096 | delta (unfused−fused) | 1.03 | 6.99 | 6.77 | INDETERMINATE (below resolution — no claim) |
 | f4 | 4096 | unfused-stream (diagnostic) | 69.22 | 97.38 | 0.71 | — |
 | f4 | 4096 | fused (diagnostic) | 69.22 | 90.39 | 0.77 | — |
 
@@ -94,7 +94,8 @@ H1-v2 (F1/F2, launch-bound / fusion-not-worthwhile): fusion yields no wall-clock
 
 ## Summary
 
-- PASS: 76
+- PASS: 73
+- INDETERMINATE: 3 (check ran but could establish no claim either way; adds no evidential support, does not gate)
 - WARN: 0 (warnings never count as passes)
 - FAIL: 0
 - **Overall: PASS**

@@ -17,10 +17,15 @@
 # v2 decomposition (validation/PREREGISTRATION-v2.md, 2026-07-02):
 #   t_graph − t_fused = B + S
 #     B = eliminable_bytes / achieved_bw (proportional byte-time estimate)
-#     S = (t_graph − t_fused) − B: the STRUCTURAL term — execution-structure
-#         effects of fusion beyond bytes (elimination of low-parallelism
-#         interleaved stages and kernel-boundary drain when positive;
-#         recompute/occupancy cost when negative).
+#     S = (t_graph − t_fused) − B: the UNEXPLAINED RESIDUAL — everything the
+#         proportional byte estimate does not capture (execution structure,
+#         occupancy/register pressure, recompute, cache behavior, byte-model
+#         error, measurement error). The v2 registration named S the
+#         "structural term" and hypothesized a mechanism (low-parallelism
+#         interleaved stages / kernel-boundary drain when positive;
+#         recompute/occupancy cost when negative); that name is preserved in
+#         the frozen registration text, but S is a residual, not a measured
+#         mechanism, and τ corroborates its sign only.
 #   τ_v = per-round sum of ISOLATED per-kernel GPU durations from NCU
 #         (gpu__time_duration.sum). An independent instrument used
 #         DIRECTIONALLY: NCU replay flushes caches between kernels, so τ is
@@ -33,12 +38,18 @@
 #   (G0) data completeness gate (timing cells + per-dim NCU bytes AND τ)
 #   (G1) numerical correctness gate from bench_variant
 #   (a)  instrument corroboration: sign(τ_u − τ_f) must agree with
-#        sign(t_graph − t_fused), unless either magnitude is within the 5 µs
-#        near-zero indeterminacy band
+#        sign(t_graph − t_fused). If either magnitude is within the 5 µs
+#        near-zero band the check is INDETERMINATE (2026-07-03 change
+#        control: previously recorded as a vacuous PASS, which overstated
+#        evidential support — e.g. wall −14 µs vs τ −2 µs counted as
+#        corroborated)
 #   (b)  analytic vs NCU DRAM bytes: F1/F2 absolute ±20% per dim;
 #        F4 eliminated-delta gate two-sided ±50%, applicable only when the
 #        analytic delta ≥ 5% of the smaller variant total (counter-resolution
-#        floor) — otherwise recorded as below-resolution, no byte-delta claim
+#        floor) — otherwise INDETERMINATE (below resolution, no byte-delta
+#        claim; previously a no-claim PASS)
+#   INDETERMINATE is counted separately: it never adds evidential support
+#   (not a PASS) and never gates (not a FAIL); exit code unchanged.
 #   (c)  Δ_launch = t_stream - t_graph ≥ −max(0.5%·t_graph, 2 µs) (timer noise)
 #   (H)  v2 pre-registered hypotheses:
 #        H1-v2 (F1/F2, launch-bound / fusion-not-worthwhile):
@@ -155,20 +166,24 @@ class Checks:
         self.records = []  # dicts: {section, label, status, detail}
 
     def add(self, section, label, status, detail=""):
-        assert status in ("PASS", "FAIL", "WARN")
+        assert status in ("PASS", "FAIL", "WARN", "INDETERMINATE")
         self.records.append(
             {"section": section, "label": label, "status": status, "detail": detail}
         )
         return status
 
     def counts(self):
-        c = {"PASS": 0, "FAIL": 0, "WARN": 0}
+        c = {"PASS": 0, "FAIL": 0, "WARN": 0, "INDETERMINATE": 0}
         for r in self.records:
             c[r["status"]] += 1
         return c
 
     def overall(self):
-        # Fail-closed: WARN means incomplete/indeterminate, never a valid PASS.
+        # Fail-closed: WARN means incomplete data, never a valid PASS.
+        # INDETERMINATE means the check ran but could not establish its claim
+        # either way (below counter resolution, or one instrument inside the
+        # noise band): it adds no evidential support (not a PASS) and does not
+        # gate (not a FAIL).
         c = self.counts()
         if c["FAIL"] > 0:
             return "FAIL"
@@ -186,22 +201,29 @@ def relative_delta_matches(measured, analytic, relative_tol):
     return abs(measured - analytic) <= relative_tol * analytic
 
 
-def structural_term(t_graph, t_fused, byte_est):
-    """S: the structural term of the v2 decomposition, from wall-clock.
-    Positive when fusion removes execution-structure cost beyond bytes
-    (low-parallelism interleaved stages, kernel-boundary drain); negative
-    when fusion adds cost (recompute, register pressure/occupancy)."""
+def residual_term(t_graph, t_fused, byte_est):
+    """S: the unexplained residual of the v2 decomposition, from wall-clock —
+    whatever the proportional byte estimate B does not capture. The v2
+    registration named this the "structural term" with a hypothesized
+    mechanism (positive = removal of low-parallelism interleaved stages /
+    kernel-boundary drain; negative = recompute, register pressure/occupancy);
+    S itself is a residual and does not identify a mechanism."""
     return (t_graph - t_fused) - byte_est
 
 
 def sign_corroborated(wall_gap, tau_gap, noise_us=5.0):
     """Directional two-instrument check: the isolated-kernel-duration gap
-    (NCU) must agree in sign with the wall-clock gap. When either magnitude
-    is inside the near-zero band the direction is indeterminate and the
-    check passes vacuously (both instruments say ~no difference)."""
+    (NCU) must agree in sign with the wall-clock gap. Returns "PASS",
+    "FAIL", or "INDETERMINATE".
+
+    When either magnitude is inside the near-zero band no direction can be
+    established for that instrument, so no corroboration claim is possible
+    either way: INDETERMINATE. (2026-07-03 change control: this previously
+    returned a vacuous PASS, which let e.g. wall −14 µs vs τ −2 µs count as
+    corroborated and overstated the PASS tally; thresholds unchanged.)"""
     if abs(wall_gap) <= noise_us or abs(tau_gap) <= noise_us:
-        return True
-    return (wall_gap > 0) == (tau_gap > 0)
+        return "INDETERMINATE"
+    return "PASS" if (wall_gap > 0) == (tau_gap > 0) else "FAIL"
 
 
 def f4_delta_detectable(analytic_delta_bytes, total_unfused, total_fused,
@@ -361,20 +383,24 @@ def main():
                 report.append(f"| {fusion} | {dim} | {variant} | {ok} | {status} |")
     report.append("")
 
-    # ---- Check (a): v2 structural decomposition + instrument corroboration ----
-    report.append("## Check (a): Structural decomposition t_graph − t_fused = B + S, τ corroboration")
+    # ---- Check (a): v2 decomposition + instrument corroboration ----
+    report.append("## Check (a): Decomposition t_graph − t_fused = B + S (unexplained residual), τ corroboration")
     report.append("")
     report.append(
         "v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time "
-        "estimate B and the structural term S = (t_graph − t_fused) − B. The gate "
-        "is DIRECTIONAL instrument corroboration: the independently measured "
-        "isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must "
-        "agree in sign with the wall-clock gap, unless either magnitude is within "
-        "the 5 µs near-zero band. τ magnitudes are NOT gated: NCU replay flushes "
-        "caches between kernels, inflating multi-kernel chains that enjoy "
-        "inter-kernel L2 reuse in steady state; the sign is robust to that bias, "
-        "the microsecond value is not. [Supersedes the v1 residual gate "
-        "(gap ≈ B alone), refuted on T4 2026-07-02 — see README.]"
+        "estimate B and the unexplained residual S = (t_graph − t_fused) − B "
+        "(registered under the name 'structural term'; S is a residual, not a "
+        "measured mechanism). The gate is DIRECTIONAL instrument corroboration: "
+        "the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU "
+        "gpu__time_duration.sum) must agree in sign with the wall-clock gap. If "
+        "either magnitude is within the 5 µs near-zero band, no direction can be "
+        "established and the check is INDETERMINATE — no corroboration claim "
+        "either way (2026-07-03 change control; previously a vacuous PASS). τ "
+        "magnitudes are NOT gated: NCU replay flushes caches between kernels, "
+        "inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady "
+        "state; the sign is robust to that bias, the microsecond value is not. "
+        "[Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 "
+        "2026-07-02 — see README.]"
     )
     report.append("")
     report.append(
@@ -393,15 +419,15 @@ def main():
             if not (t_graph > 0 and t_fused > 0 and tau_u > 0 and tau_f > 0):
                 continue  # missing data already FAILed in G0
             B = compute_B(fusion, int(dim), t_graph)
-            S = structural_term(t_graph, t_fused, B)
+            S = residual_term(t_graph, t_fused, B)
             S_terms[(fusion, dim)] = (B, S)
             gap = t_graph - t_fused
             tau_gap = tau_u - tau_f
-            ok = sign_corroborated(gap, tau_gap)
             status = checks.add(
-                "a", f"{fusion}/{dim}", "PASS" if ok else "FAIL",
+                "a", f"{fusion}/{dim}", sign_corroborated(gap, tau_gap),
                 f"wall gap={gap:.2f}us vs tau gap={tau_gap:.2f}us "
-                f"(sign agreement required outside ±5us)",
+                f"(sign agreement required outside ±5us; inside the band the "
+                f"direction is indeterminate)",
             )
             report.append(
                 f"| {fusion} | {dim} | {t_graph:.2f} | {t_fused:.2f} | {gap:.2f} "
@@ -419,10 +445,11 @@ def main():
         "two-sided ±{:.0f}%, but ONLY when the analytic delta is at least 5% of "
         "the smaller variant total: below that the signal sits under the "
         "DRAM-counter noise floor (uniform ~1.3-1.4x excess on KV streams "
-        "observed on T4, both variants) and the check records "
-        "below-resolution — no byte-delta claim is made either way. The v2 "
-        "byte term for F4 is B inside the check (a) decomposition, not this "
-        "counter delta.".format(args.f4_delta_tol * 100)
+        "observed on T4, both variants) and the check records INDETERMINATE — "
+        "no byte-delta claim is made either way, and the cell adds no "
+        "evidential support (2026-07-03 change control; previously a no-claim "
+        "PASS). The v2 byte term for F4 is B inside the check (a) "
+        "decomposition, not this counter delta.".format(args.f4_delta_tol * 100)
     )
     report.append("")
     report.append("| Fusion | Dim | Variant | Analytic (MB) | NCU DRAM (MB) | Ratio | Status |")
@@ -460,13 +487,13 @@ def main():
                         shown = status
                     else:
                         checks.add(
-                            "b", f"f4/delta/{dim}", "PASS",
+                            "b", f"f4/delta/{dim}", "INDETERMINATE",
                             f"below counter resolution: analytic delta "
                             f"{analytic_delta_mb:.2f} MB < 5% of "
                             f"{min(totals.values()):.2f} MB total — no "
                             f"byte-delta claim on this GPU",
                         )
-                        shown = "PASS (below resolution — no claim)"
+                        shown = "INDETERMINATE (below resolution — no claim)"
                     report.append(
                         f"| f4 | {dim} | delta (unfused−fused) | "
                         f"{analytic_delta_mb:.2f} | {delta_mb:.2f} | "
@@ -593,6 +620,9 @@ def main():
     report.append("## Summary")
     report.append("")
     report.append(f"- PASS: {c['PASS']}")
+    report.append(f"- INDETERMINATE: {c['INDETERMINATE']} (check ran but could "
+                  "establish no claim either way; adds no evidential support, "
+                  "does not gate)")
     report.append(f"- WARN: {c['WARN']} (warnings never count as passes)")
     report.append(f"- FAIL: {c['FAIL']}")
     report.append(f"- **Overall: {overall}**")
