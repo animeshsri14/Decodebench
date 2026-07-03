@@ -90,6 +90,34 @@ t_graph − t_fused = B + S
 - S/B on A100 ≤ S/B on T4 (prediction 3) — reported as a refuted prediction
   (does not gate the run's validity, since it compares across runs).
 
+## Confirmatory outcomes
+
+### L4 (SM89, Ada, 58 SMs) — 2026-07-02, `results/l4/validation_report.md`
+
+Overall FAIL (74 PASS / 0 WARN / 2 FAIL); both FAILs are H2-v2. Gates ran
+unchanged; verified by independent re-run of `compare.py` on the committed
+data (identical tables, exit 1).
+
+- **Prediction 1 (H1-v2 holds): CONFIRMED.** Fused F1/F2 slower than the
+  graph baseline at both dims (S = −3.4 to −29.3 µs), τ sign corroborated.
+- **Prediction 2 (H2-v2 holds): REFUTED.** F4 fused ties the graph baseline
+  (141.90 vs 139.64 µs at dim 2048, within noise; 279.39 vs 279.40 µs at
+  dim 4096) and S inverts: gap 2.26 = B 4.30 + S −2.04 (2048);
+  gap −0.00 = B 8.46 + S −8.47 (4096). S ≤ 0 and S < B at both dims —
+  this meets the pre-registered falsification criterion for H2-v2.
+- **Prediction 3 (S/B grows with SM count; primary test A100 vs T4):
+  pending A100, but the L4 data point contradicts the mechanism.**
+  L4 S/B = −0.47 (2048) and −1.00 (4096) vs T4 calibration +2.7 / +4.7,
+  despite 58 > 40 SMs.
+- **Prediction 4 (F4 byte-delta below counter resolution): CONFIRMED.**
+  Analytic deltas 0.52/1.03 MB against ~38–79 MB totals; recorded as
+  below-resolution, no byte-delta claim, at both dims.
+
+Interpretation: the T4 structure-bound F4 win is architecture-specific.
+On Ada the fused split-KV F4 kernel's structural benefit is fully offset
+(S < 0), leaving no wall-clock advantage. Recorded as a v2 negative
+result; gates and tolerances unchanged per change control below.
+
 ## Provenance & change control
 
 - v1 hypotheses and their T4 refutation are preserved in the README

@@ -130,7 +130,7 @@ decodebench demo f4
 | GPU | Status | Headline result |
 |-----|--------|-----------------|
 | T4 (SM75, Turing, 40 SMs) | **VALIDATED — 76/76 PASS (v2, calibration)** | F4 fused beats the CUDA-graph baseline: 166.3 vs 187.6 µs (L=2048) and 317.5 vs 384.2 µs (L=4096, **17% faster**). Decomposition: gap 66.6 µs = B 11.6 µs (bytes) + S 55.0 µs (structure) — **structure-bound, S/B = 4.7**. F1/F2 fused are slower than the graph baseline (S = −34 to −102 µs): fusion not worthwhile; CUDA Graphs suffice. G1 correctness 18/18; G2 GEMV 108.6% of cuBLAS. |
-| L4 (SM89, Ada) | confirmatory re-run scheduled (machine moves next) | Historical 2026-06 data retained as raw measurements only — predates the tuned split-KV F4 kernel, `--dim`=KV-length semantics, F2 byte-model fix, and residency parity. |
+| L4 (SM89, Ada, 58 SMs) | **H2-v2 REFUTED — 74 PASS / 2 FAIL, Overall FAIL (v2, confirmatory)** | F4 fused does **not** beat the graph baseline: 139.6 vs 141.9 µs (L=2048, within noise) and 279.40 vs 279.39 µs (L=4096, exact tie). The structural term inverts: gap 2.26 µs = B 4.30 + S −2.04 (L=2048); gap −0.00 µs = B 8.46 + S −8.47 (L=4096) — **S/B = −0.47 and −1.00 vs T4's +2.7/+4.7**, refuting the S-grows-with-SM-count prediction (58 vs 40 SMs). H1-v2 holds (fused F1/F2 slower, S = −3.4 to −29.3 µs). G1 correctness 18/18; G2 GEMV 100.6% of cuBLAS; τ sign-corroboration 6/6. The run is clean — the FAIL is the pre-registered hypothesis being falsified (`results/l4/validation_report.md`). |
 | A100 (SM80, Ampere, 108 SMs) | confirmatory, pending | v2 prediction: H1-v2/H2-v2 hold; F4 S/B > 4.7 (larger SM count → larger structural share). |
 | RTX Pro 6000 (SM120, Blackwell, 192 SMs) | confirmatory, pending | Same predictions; largest expected S/B. |
 
@@ -141,6 +141,12 @@ decodebench demo f4
 - **v1-H2 ("byte-bound", B ≥ 80% of gap) is refuted and retired:** B explains ~20% of the F4 gap. F4's eliminable-byte fraction is structurally small (≈4/D ≈ 3% of traffic, independent of L) — the wall-clock win is real but comes from structure, not bytes. Do not cite the 17% as a byte-elimination result.
 - **F4 NCU byte-delta is below counter resolution on T4** (analytic delta 0.5–1.0 MB vs ~46–97 MB totals with a uniform ~1.3–1.4× counter excess on KV streams, both variants): recorded as below-resolution, no byte-delta claim. Absolute totals stay in the report as diagnostics. F1/F2 byte totals gate normally and pass at ratios 0.84–0.89.
 - **Known operational caveats (unchanged):** GPU clocks not locked (`--clock-control none`; timings were stable across run halves), variants not interleaved within a run.
+
+**Outcome notes (L4, 2026-07-02, v2 confirmatory):**
+
+- **H2-v2 is refuted on L4.** The F4 fused win observed on T4 does not transfer: on L4 the fused kernel merely ties the graph baseline, and S is negative at both KV lengths (fusion adds structural cost on this part instead of removing it). Under pre-registration v2's falsification criteria ("fused F4 losing to the graph baseline, or S ≤ B, on any GPU"), this is a confirmatory refutation — the T4 structure-bound characterization of F4 is architecture-specific, not general.
+- **The S/B-grows-with-SM-count mechanism is contradicted by the L4 data point.** L4 has more SMs than T4 (58 vs 40), so the H=32-block-softmax argument predicted a larger structural share; instead S/B fell from +2.7/+4.7 to −0.47/−1.00. The A100 run (108 SMs, prediction 3's primary test) remains worth running, but the proposed mechanism cannot be the whole story.
+- **Everything else replicated:** H1-v2 held (fused F1/F2 slower than the graph baseline, as on T4), all 18 correctness checks passed, τ/wall-clock sign corroboration passed 6/6, F1/F2 byte totals gated at ratios 0.87–0.90, and the F4 byte-delta was below counter resolution as predicted (prediction 4). The gates ran unchanged; the FAIL is the hypothesis, not the instrument. Environment: driver 595.71.05, CUDA 12.9.86, g++-14.3.0; NCU collection required a sudo rerun of `ncu_collect.sh` (filesystem permissions), no code changes.
 
 ---
 
