@@ -23,7 +23,7 @@ def test_report_success(tmp_path):
     )
     
     verd = rep.verdict()
-    assert verd.bound == "launch-bound"
+    assert verd.bound == "low-byte-opportunity"
     assert verd.delta_launch_ci is not None
     
     # Check CSV export

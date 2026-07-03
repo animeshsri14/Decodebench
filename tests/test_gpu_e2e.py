@@ -145,9 +145,9 @@ def test_time_callable_sanity():
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("demo_name,expected_bound", [
-    ("f1", "launch-bound"),
-    ("f2", "launch-bound"),
-    ("f4", "byte-bound")
+    ("f1", "low-byte-opportunity"),
+    ("f2", "low-byte-opportunity"),
+    ("f4", "material-byte-opportunity")
 ])
 def test_demo_verdicts(demo_name, expected_bound):
     seq, inputs, replicas = build_demo(demo_name, dim=4096, batch=1)

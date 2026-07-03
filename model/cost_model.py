@@ -50,7 +50,7 @@ class FusionCost:
     total: int
     eliminable: int
     ratio: float
-    predicted: Literal["launch-bound", "byte-bound"]
+    predicted: Literal["low-byte-opportunity", "material-byte-opportunity"]
 
 def compute_fusion_costs(
     d: int = 4096, b: int = 1, threshold: float = 0.01
@@ -63,8 +63,9 @@ def compute_fusion_costs(
         tot = total_bytes(traces)
         elim = eliminable_bytes(traces)
         ratio = elim / tot if tot else 0.0
-        predicted: Literal["launch-bound", "byte-bound"] = (
-            "byte-bound" if ratio >= threshold else "launch-bound"
+        predicted: Literal["low-byte-opportunity", "material-byte-opportunity"] = (
+            "material-byte-opportunity" if ratio >= threshold
+            else "low-byte-opportunity"
         )
         out.append(FusionCost(name, tot, elim, ratio, predicted))
     return out

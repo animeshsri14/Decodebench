@@ -26,7 +26,9 @@ class Verdict:
     total_bytes: int
     eliminable_bytes: int
     byte_threshold: float
-    bound: str               # "launch-bound" | "byte-bound" (analytic byte-fraction materiality)
+    bound: str               # "low-byte-opportunity" | "material-byte-opportunity" (analytic
+                             # byte-fraction materiality; pre-2026-07-03 versions said
+                             # "launch-bound"/"byte-bound", which overstated the diagnosis)
     dominant: str            # "launch" | "bytes" — which measured/estimated term is larger
     delta_launch_ci: Optional[tuple[float, float]] = None
     t_fused: Optional[float] = None
@@ -45,7 +47,7 @@ class Verdict:
             ci = f" (95% CI [{lo:.2f}, {hi:.2f}])"
             ci_spans_zero = lo <= 0.0 <= hi
         advice = ("enable CUDA Graphs first; the declared byte fraction is below the configured fusion threshold."
-                  if self.bound == "launch-bound" else
+                  if self.bound == "low-byte-opportunity" else
                   "the declared byte fraction clears the threshold; benchmark a representative fused kernel before committing.")
         launch_line = (
             f"CUDA Graphs eliminate {self.delta_launch:.2f} us here{ci} (measured)."
@@ -65,15 +67,15 @@ class Verdict:
             lines.append(f"Measured fused latency: {self.t_fused:.2f} us.")
             lines.append(f"Decomposition: launch overhead {self.delta_launch:.2f} us + "
                          f"eliminable bytes {self.b_bytes_est:.2f} us + "
-                         f"efficiency residual {self.residual_us:.2f} us = "
+                         f"unexplained residual {self.residual_us:.2f} us = "
                          f"{self.delta_launch + self.b_bytes_est + self.residual_us:.2f} us "
                          f"(t_stream - t_fused).")
         lines.append(f"Verdict: {self.bound.upper()} -> {advice}")
-        if self.bound == "byte-bound" and self.dominant == "launch":
+        if self.bound == "material-byte-opportunity" and self.dominant == "launch":
             lines.append(
-                "Caution: measured launch savings exceed the byte estimate; the byte-bound "
-                "classification reflects the analytic byte fraction, not the empirically "
-                "dominant source of gain.")
+                "Caution: measured launch savings exceed the byte estimate; the "
+                "material-byte-opportunity classification reflects the analytic byte "
+                "fraction, not the empirically dominant source of gain.")
         return "\n".join(lines)
 
 def compute_verdict(t_stream: float, t_graph: float, total_bytes: int,
@@ -101,7 +103,10 @@ def compute_verdict(t_stream: float, t_graph: float, total_bytes: int,
     delta_launch = t_stream - t_graph
     # `bound` classifies the analytic eliminable-byte fraction (hardware-independent
     # materiality gate); `dominant` compares it against the *measured* launch term.
-    bound = "byte-bound" if b_bytes_est >= byte_threshold * t_graph else "launch-bound"
+    # The labels deliberately claim only byte *opportunity* — the threshold cannot
+    # diagnose a chain as compute-, latency-, or occupancy-bound.
+    bound = ("material-byte-opportunity" if b_bytes_est >= byte_threshold * t_graph
+             else "low-byte-opportunity")
     dominant = "launch" if delta_launch >= b_bytes_est else "bytes"
     residual_us = None if t_fused is None else (t_graph - t_fused) - b_bytes_est
     return Verdict(t_stream, t_graph, delta_launch, b_bytes_est, achieved_bw,

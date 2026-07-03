@@ -1,8 +1,8 @@
 import pytest
 from decodebench.verdict import compute_verdict, Verdict
 
-def test_verdict_launch_bound():
-    # launch-bound case (t_stream=20, t_graph=16, F1 bytes: total 33595392, elim 16384)
+def test_verdict_low_byte_opportunity():
+    # low-byte-opportunity case (t_stream=20, t_graph=16, F1 bytes: total 33595392, elim 16384)
     v = compute_verdict(
         t_stream=20.0,
         t_graph=16.0,
@@ -10,7 +10,7 @@ def test_verdict_launch_bound():
         eliminable_bytes=16384,
         byte_threshold=0.01
     )
-    assert v.bound == "launch-bound"
+    assert v.bound == "low-byte-opportunity"
     assert v.delta_launch == 4.0
     assert abs(v.b_bytes_est - (16384 / (33595392 / 16.0))) < 1e-6
     # Deprecated alias still works
@@ -23,17 +23,17 @@ def test_verdict_launch_bound():
     assert "CUDA Graphs eliminate 4.00 us here" in r
     assert "Eliminable intermediate bytes correspond to" in r
     assert "NOT a strict bound" in r
-    assert "Verdict: LAUNCH-BOUND" in r
+    assert "Verdict: LOW-BYTE-OPPORTUNITY" in r
 
 def test_verdict_threshold_respected():
     # Use a 3% ratio (30,000 / 1,000,000)
-    # With threshold 0.01 (1%), should be byte-bound
+    # With threshold 0.01 (1%), should be material-byte-opportunity
     v_byte = compute_verdict(t_stream=20, t_graph=16, total_bytes=1000000, eliminable_bytes=30000, byte_threshold=0.01)
-    assert v_byte.bound == "byte-bound"
+    assert v_byte.bound == "material-byte-opportunity"
 
-    # With threshold 0.05 (5%), should be launch-bound
+    # With threshold 0.05 (5%), should be low-byte-opportunity
     v_launch = compute_verdict(t_stream=20, t_graph=16, total_bytes=1000000, eliminable_bytes=30000, byte_threshold=0.05)
-    assert v_launch.bound == "launch-bound"
+    assert v_launch.bound == "low-byte-opportunity"
 
 def test_verdict_f4_ratio_regression():
     # RI-1: F4 ratio case at dim=4096, B=1: total_bytes=17317888, eliminable_bytes=524288
@@ -45,9 +45,10 @@ def test_verdict_f4_ratio_regression():
         byte_threshold=0.01
     )
     # Ratio = 524288 / 17317888 = 3.027% which is > 1% threshold
-    assert v.bound == "byte-bound"
+    assert v.bound == "material-byte-opportunity"
     # delta_launch (4 us) far exceeds B (~0.48 us): render must caution that the
-    # byte-bound label is an analytic fraction, not the measured dominant term.
+    # material-byte-opportunity label is an analytic fraction, not the measured
+    # dominant term.
     assert v.dominant == "launch"
     assert "Caution: measured launch savings exceed the byte estimate" in v.render()
 
@@ -80,4 +81,4 @@ def test_verdict_with_fused():
     r = v.render()
     assert "Measured fused latency: 12.00 us" in r
     assert "Decomposition:" in r
-    assert "efficiency residual 3.99 us" in r
+    assert "unexplained residual 3.99 us" in r
