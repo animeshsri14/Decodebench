@@ -1,5 +1,5 @@
 # DecodeBench Validation Report
-Generated: 2026-07-03T21:58:43.528745
+Generated: 2026-07-03T22:03:43.083968
 
 ## Check (G0): Data completeness
 
@@ -46,8 +46,10 @@ Every expected (fusion, dim, batch, variant) config must be present with usable 
 
 v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the unexplained residual S = (t_graph − t_fused) − B (registered under the name 'structural term'; S is a residual, not a measured mechanism). The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap. If either magnitude is within the 5 µs near-zero band, no direction can be established and the check is INDETERMINATE — no corroboration claim either way (2026-07-03 change control; previously a vacuous PASS). τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
 
-| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | τ_u−τ_f (us) | Status |
-|--------|-----|-------------|-------------|----------|--------|--------|--------------|--------|
+S carries a 95% bootstrap CI (10k resamples of both variant medians, fixed seed; B is linear in t_graph so S propagates exactly). The CI reflects within-run resampling uncertainty only — trials may be autocorrelated and between-run variance needs repeat fresh-process runs.
+
+| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | S 95% CI (us) | τ_u−τ_f (us) | Status |
+|--------|-----|-------------|-------------|----------|--------|--------|---------------|--------------|--------|
 
 ## Check (b): Analytic bytes vs NCU DRAM bytes
 
