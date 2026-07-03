@@ -155,3 +155,51 @@ def test_demo_verdicts(demo_name, expected_bound):
     assert report.graph_ok is True
     v = report.verdict()
     assert v.bound == expected_bound
+
+
+@pytest.mark.gpu
+def test_profile_with_fused_callable():
+    """profile(fused=...) times the fused impl on the same inputs, checks its
+    output against the unfused chain, and populates Report.fused_us."""
+    d = 512
+    x = torch.randn(1, d, dtype=torch.float16, device="cuda")
+    g = torch.randn(d, dtype=torch.float16, device="cuda")
+
+    seq = Sequence("fused_e2e")
+
+    @seq.stage
+    def scale(x, g):
+        return (x * g).contiguous()
+
+    @seq.stage
+    def shift(scale):
+        return scale + 1.0
+
+    def fused_impl(inputs):
+        return inputs["x"] * inputs["g"] + 1.0
+
+    report = seq.profile({"x": x, "g": g}, trials=6, target_ms=2.0, warmup=5,
+                         fused=fused_impl)
+    assert report.fused_us is not None
+    assert len(report.fused_us) == 6
+    assert len(report.stream_us) == 6 and len(report.graph_us) == 6
+    v = report.verdict()
+    assert v.t_fused is not None and v.t_fused > 0
+
+
+@pytest.mark.gpu
+def test_profile_fused_correctness_mismatch_raises():
+    d = 256
+    x = torch.randn(1, d, dtype=torch.float16, device="cuda")
+
+    seq = Sequence("fused_bad")
+
+    @seq.stage
+    def double(x):
+        return x * 2.0
+
+    def wrong_fused(inputs):
+        return inputs["x"] * 3.0  # deliberately wrong
+
+    with pytest.raises(ValueError, match="fused"):
+        seq.profile({"x": x}, trials=3, target_ms=2.0, warmup=2, fused=wrong_fused)

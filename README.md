@@ -217,6 +217,16 @@ seq = db.Sequence("my-fusion")
 inputs = {"x": torch.randn(1, 4096, dtype=torch.float16, device="cuda")}  # example
 report = seq.profile(inputs, trials=30, warmup=50)
 print(report.render())          # report.verdict() returns the Verdict object
+
+# Controlled fused comparison: pass your fused implementation and DecodeBench
+# times it on the same input tensors, interleaved with the unfused stream and
+# graph variants, after checking its output against the unfused chain
+# (abs < 5e-2 or rel < 2e-2 elementwise — same tolerance as the CUDA
+# validation harness). Report.fused_us and Verdict.t_fused are populated.
+def my_fused(inputs):            # same inputs dict, returns the final tensor
+    return my_fused_kernel(inputs["x"])
+
+report = seq.profile(inputs, trials=30, warmup=50, fused=my_fused)
 ```
 
 ### Key Functions

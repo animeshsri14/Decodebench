@@ -204,11 +204,20 @@ class Sequence:
         byte_threshold: float = DEFAULT_BYTE_THRESHOLD,
         seed: int = 42,
         input_replicas: list[dict] | None = None,
+        fused: Callable[[dict], Any] | None = None,
     ):
         """input_replicas (RI-3): optional list of input dicts with identical
         shapes/dtypes; invocation i uses replica i % N to defeat L2 residency
         (v3 §6.2).  Demos pass weight-replicated dicts; user chains may omit
         (binary verdict unaffected).
+
+        fused: optional callable taking the same inputs dict as the chain and
+        returning a single tensor equivalent to the chain's final output. It
+        is timed on the same input replicas as the unfused variants, and its
+        output is checked against the unfused chain before any timing (fail
+        if abs_error >= 5e-2 AND rel_error >= 2e-2 anywhere — the validation
+        harness's G1 tolerance). Linear single-output chains only; this is
+        deliberately not a general multi-output experiment API.
         """
         import torch
 
@@ -222,16 +231,15 @@ class Sequence:
         self._validate_replicas(replicas)
         traces = self.trace(replicas[0])
 
+        if fused is not None:
+            self._check_fused_output(fused, replicas[0], torch)
+
         counter = {"i": 0}
 
         def stream_body():
             inp = replicas[counter["i"] % len(replicas)]
             counter["i"] += 1
             return self._replay_body(inp)
-
-        stream_us = time_callable(
-            stream_body, trials=trials, target_ms=target_ms, warmup=warmup
-        )
 
         # Replica graphs always replay sequentially in this same round-robin
         # order, so they may safely share a graph-private allocator pool rather
@@ -244,6 +252,9 @@ class Sequence:
         ]
         bad = next((c for c in captured if not c.ok), None)
         if bad is not None:
+            stream_us = time_callable(
+                stream_body, trials=trials, target_ms=target_ms, warmup=warmup
+            )
             return Report(
                 self.name,
                 stream_us,
@@ -260,10 +271,65 @@ class Sequence:
             captured[gcounter["i"] % len(captured)].replay()
             gcounter["i"] += 1
 
-        graph_us = time_callable(
-            graph_body, trials=trials, target_ms=target_ms, warmup=warmup
+        fcounter = {"i": 0}
+
+        def fused_body():
+            inp = replicas[fcounter["i"] % len(replicas)]
+            fcounter["i"] += 1
+            return fused(inp)
+
+        # Interleave variants in rotated rounds so slow drift (clocks,
+        # thermals) spreads across all variants instead of biasing whichever
+        # variant happens to run last.
+        variants = [("stream", stream_body), ("graph", graph_body)]
+        if fused is not None:
+            variants.append(("fused", fused_body))
+        results: dict[str, list[float]] = {name: [] for name, _ in variants}
+        rounds = min(3, trials)
+        per_round = [trials // rounds + (1 if r < trials % rounds else 0)
+                     for r in range(rounds)]
+        for r, n in enumerate(per_round):
+            order = variants[r % len(variants):] + variants[:r % len(variants)]
+            for name, body in order:
+                results[name].extend(time_callable(
+                    body, trials=n, target_ms=target_ms,
+                    warmup=warmup if r == 0 else min(warmup, 5),
+                ))
+
+        return Report(
+            self.name,
+            results["stream"],
+            results["graph"],
+            traces,
+            fused_us=results.get("fused"),
+            byte_threshold=byte_threshold,
         )
-        return Report(self.name, stream_us, graph_us, traces, byte_threshold=byte_threshold)
+
+    def _check_fused_output(self, fused, inputs, torch) -> None:
+        """Run fused and unfused once on identical inputs and require the
+        outputs to agree elementwise (abs < 5e-2 OR rel < 2e-2)."""
+        ref = self._replay_body(inputs)
+        out = fused(inputs)
+        if not isinstance(out, torch.Tensor):
+            raise ValueError(
+                f"fused callable must return a single torch.Tensor "
+                f"(got {type(out).__name__})"
+            )
+        if out.shape != ref.shape:
+            raise ValueError(
+                f"fused output shape {tuple(out.shape)} != unfused chain "
+                f"output shape {tuple(ref.shape)}"
+            )
+        abs_err = (out.float() - ref.float()).abs()
+        rel_err = abs_err / ref.float().abs().clamp_min(1e-12)
+        ok = (abs_err < 5e-2) | (rel_err < 2e-2)
+        if not bool(ok.all()):
+            raise ValueError(
+                f"fused output does not match the unfused chain: "
+                f"max_abs={abs_err.max().item():.3e}, "
+                f"max_rel={rel_err.max().item():.3e} "
+                f"(pass requires abs < 5e-2 or rel < 2e-2 elementwise)"
+            )
 
     def _replay_body(self, inp):
         prev = None
