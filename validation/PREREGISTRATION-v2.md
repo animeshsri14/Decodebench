@@ -118,6 +118,45 @@ On Ada the fused split-KV F4 kernel's structural benefit is fully offset
 (S < 0), leaving no wall-clock advantage. Recorded as a v2 negative
 result; gates and tolerances unchanged per change control below.
 
+### RTX Pro 6000 (SM120, Blackwell, 94 SMs visible — MIG 2g.48gb slice of a DC-2-48Q vGPU) — 2026-07-03, `results/rtx6000pro/validation_report.md`
+
+Overall FAIL (42 PASS / 0 WARN / 12 FAIL). **Partial run: timing grid complete
+(540 trials, all cells ≥ 30 samples), NCU collection impossible** — the vGPU
+host profile blocks GPU performance counters (`ERR_NVGPUCTRPERM` even as
+root); all 12 FAILs are G0 missing-NCU completeness cells. Gates ran
+unchanged; checks (a), (b), and (H) could not execute for lack of the τ/byte
+instrument. Wall-clock conclusions below are derived from the committed
+`timing.csv` using the frozen v2 formulas (B is analytic from `t_graph` and
+the byte model; no NCU input).
+
+- **Prediction 1 (H1-v2 holds): REFUTED on timing (formal gate not run).**
+  Fused F1 *beats* the graph baseline by 7.78 µs at dim 4096 (noise floor
+  2 µs); fused F2 by 2.70/3.09 µs at 2048/4096. The "no fused win" condition
+  fails at three of four F1/F2 cells; S = +2.55 to +7.75 µs exceeds the
+  3 µs tolerance at f1/4096.
+- **Prediction 2 (H2-v2 holds): REFUTED.** Fused F4 loses outright to the
+  graph baseline — 74.72 vs 58.59 µs (2048), 114.91 vs 106.36 µs (4096).
+  This meets the pre-registered wall-clock falsification criterion with no
+  instrument caveat. Decomposition: gap −16.13 = B 1.77 + S −17.91 (2048);
+  gap −8.55 = B 3.22 + S −11.77 (4096). S < 0 and S < B at both dims. The
+  L4 refutation replicates on Blackwell: the inversion is not Ada-specific.
+- **Prediction 3 (S/B grows with SM count): data point at 94 SMs, trend
+  inverted.** S/B = −10.09 (2048) and −3.65 (4096) vs T4 +2.7/+4.7 (40 SMs)
+  and L4 −0.47/−1.00 (58 SMs) — monotonically decreasing with SM count at
+  both dims, the opposite slope from the registered mechanism. Note the
+  planned full-die 192-SM test did not materialize: the VM exposes a 94-SM
+  MIG slice.
+- **Prediction 4 (F4 byte-delta below counter resolution): NOT MEASURABLE**
+  (no NCU on this machine as provisioned).
+
+Deviations: (1) first attempt (commit `ff90f8b`) crashed at CUDA init —
+the guest driver had been installed with `--no-unified-memory`, omitting
+`nvidia-uvm`; fixed at the driver level (uvm compat patch for the 7.0
+kernel, module built and loaded), zero benchmark code changes. (2) NCU
+blocked by the hypervisor-side vGPU profile — not fixable from the guest;
+a passthrough or profiling-enabled instance is required for a full-gate
+Blackwell run. Gates and tolerances unchanged per change control below.
+
 ## Provenance & change control
 
 - v1 hypotheses and their T4 refutation are preserved in the README
