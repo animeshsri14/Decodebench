@@ -1,4 +1,5 @@
 import csv
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,19 @@ def test_warnings_are_not_a_valid_pass():
     checks = Checks()
     checks.add("dev", "missing", "WARN")
     assert checks.overall() == "INCOMPLETE"
+
+
+def test_bootstrap_s_ci_deterministic_and_brackets_point_estimate():
+    from validation.analysis.compare import bootstrap_s_ci
+    graph = [100.0 + 0.1 * i for i in range(30)]
+    fused = [90.0 + 0.1 * i for i in range(30)]
+    ci1 = bootstrap_s_ci(graph, fused, elim_frac=0.03)
+    ci2 = bootstrap_s_ci(graph, fused, elim_frac=0.03)
+    assert ci1 == ci2  # fixed seed -> reproducible reports
+    lo, hi = ci1
+    point = statistics.median(graph) * 0.97 - statistics.median(fused)
+    assert lo <= point <= hi
+    assert bootstrap_s_ci([], fused, 0.03) is None
 
 
 def test_indeterminate_neither_passes_nor_gates():

@@ -62,6 +62,7 @@ import argparse
 import csv
 import math
 import os
+import random
 import statistics
 import sys
 from collections import defaultdict
@@ -211,6 +212,29 @@ def residual_term(t_graph, t_fused, byte_est):
     return (t_graph - t_fused) - byte_est
 
 
+def bootstrap_s_ci(graph_samples, fused_samples, elim_frac,
+                   n_resamples=10000, seed=42, alpha=0.05):
+    """95% bootstrap CI for S = t_graph·(1 − elim_frac) − t_fused (B is linear
+    in t_graph, so S propagates exactly from the two resampled medians).
+    Deterministic: fixed seed, stdlib Mersenne Twister. Trials within a run
+    may be autocorrelated (interleaved passes mitigate but do not remove
+    this), so the interval reflects within-run resampling uncertainty only —
+    not between-run variance."""
+    if not graph_samples or not fused_samples:
+        return None
+    rng = random.Random(seed)
+    ng, nf = len(graph_samples), len(fused_samples)
+    stats = []
+    for _ in range(n_resamples):
+        g = statistics.median(rng.choice(graph_samples) for _ in range(ng))
+        f = statistics.median(rng.choice(fused_samples) for _ in range(nf))
+        stats.append(g * (1.0 - elim_frac) - f)
+    stats.sort()
+    lo = stats[int((alpha / 2) * n_resamples)]
+    hi = stats[int((1 - alpha / 2) * n_resamples) - 1]
+    return lo, hi
+
+
 def sign_corroborated(wall_gap, tau_gap, noise_us=5.0):
     """Directional two-instrument check: the isolated-kernel-duration gap
     (NCU) must agree in sign with the wall-clock gap. Returns "PASS",
@@ -311,6 +335,7 @@ def main():
     )
     report.append("")
     medians = {}       # (fusion, dim, batch, variant) -> median us
+    samples = {}       # same key -> list of usable trial values (for bootstrap)
     correctness = {}   # same key -> 0/1
     for fusion in FUSIONS:
         for dim in DIMS:
@@ -334,6 +359,7 @@ def main():
                         report.append(f"- {label}: **FAIL** ({detail})")
                         continue
                     medians[key] = statistics.median(us_vals)
+                    samples[key] = us_vals
                     oks = []
                     for r in rows:
                         try:
@@ -404,10 +430,18 @@ def main():
     )
     report.append("")
     report.append(
-        "| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | τ_u−τ_f (us) | Status |"
+        "S carries a 95% bootstrap CI (10k resamples of both variant medians, "
+        "fixed seed; B is linear in t_graph so S propagates exactly). The CI "
+        "reflects within-run resampling uncertainty only — trials may be "
+        "autocorrelated and between-run variance needs repeat fresh-process "
+        "runs."
+    )
+    report.append("")
+    report.append(
+        "| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | S 95% CI (us) | τ_u−τ_f (us) | Status |"
     )
     report.append(
-        "|--------|-----|-------------|-------------|----------|--------|--------|--------------|--------|"
+        "|--------|-----|-------------|-------------|----------|--------|--------|---------------|--------------|--------|"
     )
     S_terms = {}  # (fusion, dim) -> (B, S), for check (H)
     for fusion in FUSIONS:
@@ -423,6 +457,14 @@ def main():
             S_terms[(fusion, dim)] = (B, S)
             gap = t_graph - t_fused
             tau_gap = tau_u - tau_f
+            traces = _TRACE_BUILDERS[fusion](int(dim))
+            elim_frac = eliminable_bytes(traces) / total_bytes(traces)
+            s_ci = bootstrap_s_ci(
+                samples.get((fusion, dim, "1", "unfused-graph")),
+                samples.get((fusion, dim, "1", "fused")),
+                elim_frac,
+            )
+            s_ci_txt = f"[{s_ci[0]:.2f}, {s_ci[1]:.2f}]" if s_ci else "n/a"
             status = checks.add(
                 "a", f"{fusion}/{dim}", sign_corroborated(gap, tau_gap),
                 f"wall gap={gap:.2f}us vs tau gap={tau_gap:.2f}us "
@@ -431,7 +473,7 @@ def main():
             )
             report.append(
                 f"| {fusion} | {dim} | {t_graph:.2f} | {t_fused:.2f} | {gap:.2f} "
-                f"| {B:.2f} | {S:.2f} | {tau_gap:.2f} | {status} |"
+                f"| {B:.2f} | {S:.2f} | {s_ci_txt} | {tau_gap:.2f} | {status} |"
             )
     report.append("")
 

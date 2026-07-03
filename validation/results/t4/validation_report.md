@@ -1,5 +1,5 @@
 # DecodeBench Validation Report
-Generated: 2026-07-03T21:58:43.343419
+Generated: 2026-07-03T22:03:41.981431
 
 ## Check (G0): Data completeness
 
@@ -34,14 +34,16 @@ Every expected (fusion, dim, batch, variant) config must be present with usable 
 
 v2 (PREREGISTRATION-v2.md): the fusion gap decomposes into the byte-time estimate B and the unexplained residual S = (t_graph − t_fused) − B (registered under the name 'structural term'; S is a residual, not a measured mechanism). The gate is DIRECTIONAL instrument corroboration: the independently measured isolated-kernel-duration gap τ_u − τ_f (NCU gpu__time_duration.sum) must agree in sign with the wall-clock gap. If either magnitude is within the 5 µs near-zero band, no direction can be established and the check is INDETERMINATE — no corroboration claim either way (2026-07-03 change control; previously a vacuous PASS). τ magnitudes are NOT gated: NCU replay flushes caches between kernels, inflating multi-kernel chains that enjoy inter-kernel L2 reuse in steady state; the sign is robust to that bias, the microsecond value is not. [Supersedes the v1 residual gate (gap ≈ B alone), refuted on T4 2026-07-02 — see README.]
 
-| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | τ_u−τ_f (us) | Status |
-|--------|-----|-------------|-------------|----------|--------|--------|--------------|--------|
-| f1 | 2048 | 219.62 | 253.43 | -33.81 | 0.03 | -33.84 | -38.94 | PASS |
-| f1 | 4096 | 435.23 | 537.09 | -101.87 | 0.06 | -101.93 | -153.79 | PASS |
-| f2 | 2048 | 425.73 | 439.99 | -14.27 | 0.42 | -14.68 | -2.05 | INDETERMINATE |
-| f2 | 4096 | 844.47 | 878.39 | -33.92 | 0.41 | -34.33 | -22.75 | PASS |
-| f4 | 2048 | 187.56 | 166.30 | 21.26 | 5.68 | 15.58 | 55.23 | PASS |
-| f4 | 4096 | 384.16 | 317.53 | 66.63 | 11.64 | 54.99 | 135.78 | PASS |
+S carries a 95% bootstrap CI (10k resamples of both variant medians, fixed seed; B is linear in t_graph so S propagates exactly). The CI reflects within-run resampling uncertainty only — trials may be autocorrelated and between-run variance needs repeat fresh-process runs.
+
+| Fusion | Dim | t_graph (us) | t_fused (us) | Gap (us) | B (us) | S (us) | S 95% CI (us) | τ_u−τ_f (us) | Status |
+|--------|-----|-------------|-------------|----------|--------|--------|---------------|--------------|--------|
+| f1 | 2048 | 219.62 | 253.43 | -33.81 | 0.03 | -33.84 | [-34.01, -33.35] | -38.94 | PASS |
+| f1 | 4096 | 435.23 | 537.09 | -101.87 | 0.06 | -101.93 | [-102.13, -101.65] | -153.79 | PASS |
+| f2 | 2048 | 425.73 | 439.99 | -14.27 | 0.42 | -14.68 | [-14.74, -14.63] | -2.05 | INDETERMINATE |
+| f2 | 4096 | 844.47 | 878.39 | -33.92 | 0.41 | -34.33 | [-34.38, -34.26] | -22.75 | PASS |
+| f4 | 2048 | 187.56 | 166.30 | 21.26 | 5.68 | 15.58 | [12.79, 17.91] | 55.23 | PASS |
+| f4 | 4096 | 384.16 | 317.53 | 66.63 | 11.64 | 54.99 | [54.76, 57.63] | 135.78 | PASS |
 
 ## Check (b): Analytic bytes vs NCU DRAM bytes
 
