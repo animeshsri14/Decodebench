@@ -53,12 +53,17 @@ jobs:
         cuda-arch: ["75", "89", "120"]
     steps:
       - uses: actions/checkout@v4
-      - uses: Jimver/cuda-toolkit@v0.2.21
+      # v0.2.35: first tag that supports CUDA 12.9.x (v0.2.21 topped out at
+      # 12.8.0, which is why the version string was rejected). cudart-dev and
+      # libcublas-dev supply the headers the .cu targets and cuBLAS calibrate
+      # compile/link against; without the -dev packages the build cannot find
+      # cuda_runtime.h / cublas_v2.h.
+      - uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.9.0"
           method: network
-          sub-packages: '["nvcc", "cudart"]'
-          non-cuda-sub-packages: '["libcublas-dev"]'
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev"]'
       - name: Configure
         run: >
           cmake -S validation -B validation/build-cuda
