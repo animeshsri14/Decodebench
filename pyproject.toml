@@ -9,6 +9,7 @@ dependencies = ["numpy", "matplotlib"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+gpu = ["torch"]
 
 [project.scripts]
 decodebench = "decodebench.cli:main"

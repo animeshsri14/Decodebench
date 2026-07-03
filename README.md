@@ -4,7 +4,7 @@
 [![CUDA 12+](https://img.shields.io/badge/CUDA-12%2B-76b900.svg)](https://developer.nvidia.com/cuda-downloads)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Quantify how much of your LLM decode-chain fusion gain comes from launch overhead vs. eliminated intermediate bytes.**
+**A CUDA benchmarking and analysis framework for separating graph-recoverable launch overhead from estimated intermediate-byte cost, with cross-architecture experiments that falsified the initial fusion hypothesis.**
 
 When you fuse a pipeline of decode kernels (e.g., RMSNorm → GEMV), you observe a speedup. DecodeBench decomposes that speedup into two terms:
 
@@ -170,7 +170,11 @@ For development (includes pytest and matplotlib):
 pip install -e ".[dev]"
 ```
 
-**Requirements:** Python ≥ 3.10, NumPy. PyTorch is a soft dependency - required only for GPU code paths (lazy-imported so CPU-only analysis does not need a GPU).
+**Requirements:** Python ≥ 3.10, NumPy. PyTorch is a soft dependency - required only for GPU code paths (lazy-imported so CPU-only analysis does not need a GPU). To install it alongside the package:
+
+```bash
+pip install "decodebench[gpu]"
+```
 
 ---
 
@@ -183,8 +187,10 @@ decodebench demo f1          # Run built-in F1 demo (RMSNorm → GEMV)
 decodebench demo f2          # Run built-in F2 demo (Gate/Up + SwiGLU)
 decodebench demo f4          # Run built-in F4 demo (Attention scores+softmax+V)
 
-decodebench profile --fusion F1 --dim 4096   # Profile a specific fusion and dimension
-decodebench sweep --dims 2048 4096 8192       # Sweep dimensions, print analytic predictions
+decodebench demo f1 --dim 2048 --batch 1 --trials 30   # Demo with explicit options
+decodebench profile my_chain.py:build_fn                # Profile a user-defined Sequence
+                                                        #   (build_fn returns (seq, inputs))
+decodebench sweep f1 --batch 1,2,4,8 --dim 4096         # Sweep batch sizes for a demo
 ```
 
 All subcommands support `--dry-run` to preview without executing GPU code.
@@ -255,7 +261,7 @@ Citation:
             Overhead vs.\ Byte-Elimination in LLM Decode-Chain Fusion},
   author = {Animesh},
   year   = {2026},
-  note   = {Open-source tool. \url{https://github.com/animesh/decodebench}},
+  note   = {Open-source tool. \url{https://github.com/animeshsri14/Decodebench}},
 }
 ```
 

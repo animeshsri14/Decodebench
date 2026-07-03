@@ -7,11 +7,19 @@ Reproducible CUDA validation kernels and harness for DecodeBench
 
 | Check    | Claim | Validation Method |
 |----------|------------|-------------------|
+| G0       | Data completeness (fail-closed) | Every (fusion, dim, batch, variant) timing cell has ≥ 30 usable samples and every NCU cell has bytes + kernel durations; any missing cell is a FAIL |
 | G1       | Kernel correctness | Every output passes `abs_error < 5e-2 OR rel_error < 2e-2`; F1/F2/F4 use independent CPU references |
 | G2       | GEMV kernel >= 90% cuBLAS bandwidth | `calibrate --gate-g2` compares unfused FP16 GEMV to cublasGemmEx |
-| (a)      | t_graph ≈ t_fused + B within ±2% of t_graph | `compare.py` checks `abs(t_graph - t_fused - B)` |
-| (b)      | F1/F2 totals within 20%; F4 eliminated delta within a two-sided tolerance of the modeled delta | `compare.py` joins timing CSV + NCU metrics |
-| (c)      | Launch overhead captured by graphs (Δ_launch > 0) | `compare.py` checks t_stream - t_graph vs 0 |
+| (a)      | v2 decomposition `t_graph − t_fused = B + S` with directional instrument corroboration | `compare.py` computes B analytically (eliminable bytes ÷ achieved bandwidth) and S as the residual; the NCU per-kernel-duration gap τ_u − τ_f must agree in *sign* with the wall-clock gap outside a ±5 µs band (magnitudes are not gated — NCU replay flushes caches) |
+| (b)      | F1/F2 absolute byte totals within ±20% of analytic; F4 eliminated delta within a two-sided tolerance, gated only when the analytic delta is ≥ 5% of totals (below that: "below resolution — no claim") | `compare.py` joins timing CSV + NCU metrics |
+| (c)      | Launch overhead captured by graphs | `compare.py` checks Δ_launch = t_stream − t_graph ≥ −max(0.5%·t_graph, 2 µs) (noise floor) |
+| H1-v2    | F1/F2: fusion not worthwhile — no fused wall-clock win beyond noise AND S ≤ max(1%·t_graph, 3 µs) | `compare.py` check (H) |
+| H2-v2    | F4: structure-bound — fused wins wall-clock AND S > 0 AND S > B | `compare.py` check (H); refuted on L4 and Blackwell (see `PREREGISTRATION-v2.md` § Confirmatory outcomes) |
+
+The v1 residual gate ("t_graph ≈ t_fused + B within ±2%") is retired — refuted
+on T4 2026-07-02 and superseded by the v2 decomposition above; see
+`PREREGISTRATION-v2.md` for the registered gates, falsification criteria, and
+per-GPU confirmatory outcomes.
 
 ## Directory Structure
 
