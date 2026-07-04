@@ -78,3 +78,49 @@ All papers and technical documents cited in the DecodeBench work.
 
 28. NVIDIA. *CUDA C++ Programming Guide §3.2.8 - CUDA Graphs.* https://docs.nvidia.com/cuda/cuda-c-programming-guide/
 
+29. NVIDIA (2024). *NVIDIA Ada GPU Architecture White Paper* (L4 / AD10x).
+
+30. NVIDIA (2024). *NVIDIA Blackwell Architecture Technical Brief* (RTX PRO 6000 / GB20x).
+
+31. NVIDIA. *TensorRT-LLM: A TensorRT Toolbox for Optimized LLM Inference.* https://github.com/NVIDIA/TensorRT-LLM
+
+---
+
+## Measurement & Statistical Methodology
+
+32. Hoefler, T., & Belli, R. (2015). *Scientific Benchmarking of Parallel Computing Systems.* SC '15.
+
+33. Efron, B., & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap.* Chapman & Hall.
+
+34. Nosek, B. A., Ebersole, C. R., DeHaven, A. C., & Mellor, D. T. (2018). *The Preregistration Revolution.* PNAS, 115(11), 2600–2606.
+
+35. Reddi, V. J., et al. (2020). *MLPerf Inference Benchmark.* ISCA 2020. arXiv:1911.02549.
+
+---
+
+## Baseline Serving Systems & Compilers
+
+36. Zheng, L., Yin, L., Xie, Z., et al. (2024). *SGLang: Efficient Execution of Structured Language Model Programs.* NeurIPS 2024. arXiv:2312.07104.
+
+37. Ansel, J., et al. (2024). *PyTorch 2: Faster Machine Learning Through Dynamic Python Bytecode Transformation and Graph Compilation (torch.compile).* ASPLOS 2024.
+
+38. Hong, K., Dai, G., Xu, J., et al. (2023). *FlashDecoding++: Faster Large Language Model Inference on GPUs.* arXiv:2311.01282.
+
+---
+
+## Decode-Chain Operators (workload provenance)
+
+39. Touvron, H., et al. (2023). *LLaMA: Open and Efficient Foundation Language Models.* arXiv:2302.13971.
+
+40. Zhang, B., & Sennrich, R. (2019). *Root Mean Square Layer Normalization (RMSNorm).* NeurIPS 2019. arXiv:1910.07467.
+
+41. Shazeer, N. (2020). *GLU Variants Improve Transformer (SwiGLU).* arXiv:2002.05202.
+
+42. Su, J., Lu, Y., Pan, S., Wen, B., & Liu, Y. (2021). *RoFormer: Enhanced Transformer with Rotary Position Embedding (RoPE).* arXiv:2104.09864.
+
+43. Shazeer, N. (2019). *Fast Transformer Decoding: One Write-Head is All You Need (Multi-Query Attention).* arXiv:1911.02150.
+
+44. Ainslie, J., Lee-Thorp, J., de Jong, M., et al. (2023). *GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.* EMNLP 2023. arXiv:2305.13245.
+
+45. Micikevicius, P., et al. (2022). *FP8 Formats for Deep Learning.* arXiv:2209.05433.
+
