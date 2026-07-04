@@ -31,11 +31,13 @@ Verdict: LOW-BYTE-OPPORTUNITY -> enable CUDA Graphs first; the declared byte fra
 ## Quickstart
 
 ```bash
-pip install decodebench
+pip install "decodebench[gpu]"   # the [gpu] extra pulls in PyTorch, required by the demos
 decodebench demo f1
 ```
 
 This runs the built-in F1 (RMSNorm → GEMV) demo on your GPU and prints a verdict block.
+(`pip install decodebench` installs the core package without PyTorch; the demos and
+`profile`/`sweep` commands need the `[gpu]` extra.)
 
 ---
 
